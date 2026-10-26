@@ -60,6 +60,8 @@ private fun AppNavHost(viewModel: AppViewModel) {
                 isLoading = viewModel.isLoading,
                 errorMessage = viewModel.errorMessage,
                 infoMessage = viewModel.infoMessage,
+                onErrorShown = { viewModel.errorMessage = null },
+                onInfoShown = { viewModel.infoMessage = null },
                 onOpenDirectory = { viewModel.openDirectory(it) },
                 onPlayFile = { resource ->
                     viewModel.playSingleFile(resource)
