@@ -20,12 +20,16 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -114,6 +118,32 @@ fun PlayerScreen(
                 )
             }
 
+            // Scrub bar: shows the live position while playing, but while
+            // the user is dragging it we show their drag position instead
+            // (otherwise the ticker would fight the finger every 500ms).
+            var draggingMs by remember { mutableStateOf<Long?>(null) }
+            val durationMs = viewModel.durationMs
+            val displayedMs = draggingMs ?: viewModel.positionMs
+            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
+                Slider(
+                    value = if (durationMs > 0) displayedMs.toFloat() else 0f,
+                    onValueChange = { draggingMs = it.toLong() },
+                    onValueChangeFinished = {
+                        draggingMs?.let { viewModel.seekTo(it) }
+                        draggingMs = null
+                    },
+                    valueRange = 0f..(durationMs.takeIf { it > 0 }?.toFloat() ?: 1f),
+                    enabled = durationMs > 0,
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = androidx.compose.foundation.layout.Arrangement.SpaceBetween,
+                ) {
+                    Text(formatDurationMs(displayedMs), style = MaterialTheme.typography.labelSmall)
+                    Text(formatDurationMs(durationMs), style = MaterialTheme.typography.labelSmall)
+                }
+            }
+
             Surface {
                 Row(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
@@ -145,4 +175,11 @@ fun PlayerScreen(
             }
         }
     }
+}
+
+private fun formatDurationMs(ms: Long): String {
+    val totalSeconds = (ms / 1000).coerceAtLeast(0)
+    val minutes = totalSeconds / 60
+    val seconds = totalSeconds % 60
+    return "%d:%02d".format(minutes, seconds)
 }

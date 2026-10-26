@@ -204,6 +204,39 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var sampleRateHz by mutableStateOf<Int?>(null)
     private var bitrateKbps by mutableStateOf<Int?>(null)
 
+    /** Current playback position / track duration, polled for the seek bar. */
+    var positionMs by mutableStateOf(0L)
+    var durationMs by mutableStateOf(0L)
+    private val positionTicker = Handler(Looper.getMainLooper())
+    private var positionTickerRunning = false
+    private val positionTickerRunnable = object : Runnable {
+        override fun run() {
+            exoPlayer?.let { player ->
+                positionMs = player.currentPosition.coerceAtLeast(0)
+                val d = player.duration
+                durationMs = if (d != C.TIME_UNSET && d > 0) d else 0L
+            }
+            if (positionTickerRunning) positionTicker.postDelayed(this, 500)
+        }
+    }
+
+    private fun startPositionTicker() {
+        if (positionTickerRunning) return
+        positionTickerRunning = true
+        positionTicker.post(positionTickerRunnable)
+    }
+
+    private fun stopPositionTicker() {
+        positionTickerRunning = false
+        positionTicker.removeCallbacks(positionTickerRunnable)
+    }
+
+    /** User-initiated seek (drag on the progress bar). */
+    fun seekTo(ms: Long) {
+        exoPlayer?.seekTo(ms.coerceIn(0, durationMs.takeIf { it > 0 } ?: ms))
+        positionMs = ms
+    }
+
     val hasActiveTrack: Boolean get() = playbackPlaylist.isNotEmpty()
     val currentTrack: WebDavResource? get() = playbackPlaylist.getOrNull(playbackIndex)
     val canGoPrevTrack: Boolean get() = playbackIndex > 0
@@ -397,6 +430,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             }
         })
         exoPlayer = player
+        startPositionTicker()
         return player
     }
 
@@ -414,6 +448,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         sampleRateHz = null
         bitrateKbps = null
         albumReplayGainDb = null
+        positionMs = 0L
+        durationMs = 0L
         prefetchWriter?.cancel()
         prefetchWriter = null
 
@@ -488,6 +524,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     /** Fully stops and tears down playback (used when entering Settings). */
     fun stopAndClearPlayback() {
         cancelScheduledRetry()
+        stopPositionTicker()
         prefetchWriter?.cancel()
         prefetchWriter = null
         exoPlayer?.run {
@@ -516,6 +553,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         super.onCleared()
         unregisterConnectivityCallback()
         cancelScheduledRetry()
+        stopPositionTicker()
         exoPlayer?.release()
         mediaCache?.release()
         loudnessEnhancer?.release()
