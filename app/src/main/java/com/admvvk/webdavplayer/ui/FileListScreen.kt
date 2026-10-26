@@ -6,6 +6,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material3.*
@@ -24,12 +25,14 @@ import com.admvvk.webdavplayer.webdav.isPlayable
 @Composable
 fun FileListScreen(
     currentPath: String,
+    canGoUp: Boolean,
     entries: List<WebDavResource>,
     isLoading: Boolean,
     errorMessage: String?,
     infoMessage: String?,
     onErrorShown: () -> Unit,
     onInfoShown: () -> Unit,
+    onGoUp: () -> Unit,
     onOpenDirectory: (WebDavResource) -> Unit,
     onPlayFile: (WebDavResource) -> Unit,
     onPlayFolder: (WebDavResource) -> Unit,
@@ -58,7 +61,20 @@ fun FileListScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text(currentPath) },
+                title = {
+                    Text(
+                        currentPath,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                },
+                navigationIcon = {
+                    if (canGoUp) {
+                        IconButton(onClick = onGoUp) {
+                            Icon(Icons.Filled.ArrowUpward, contentDescription = "Up one level")
+                        }
+                    }
+                },
                 actions = {
                     TextButton(onClick = onDisconnect) { Text("Disconnect") }
                 },

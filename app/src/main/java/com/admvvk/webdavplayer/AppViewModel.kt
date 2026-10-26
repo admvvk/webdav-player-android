@@ -43,6 +43,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     var playlist by mutableStateOf<List<WebDavResource>>(emptyList())
     var playlistIndex by mutableStateOf(0)
 
+    // The configured root (whatever URL the user entered in settings, which
+    // may itself point at a sub-folder like ".../music"). `currentHref` is
+    // null while browsing that root; once the user opens a sub-folder it
+    // holds the server-absolute href of the folder being shown.
+    private var rootUrl: String = ""
+    private var currentHref: String? = null
+
+    /** Ancestor hrefs (null = root) to support "go up one level". */
+    var pathStack by mutableStateOf<List<String?>>(emptyList())
+    val canGoUp: Boolean get() = pathStack.isNotEmpty()
+
     val savedServerUrl: String get() = prefs.getString(KEY_URL, "") ?: ""
     val savedUsername: String get() = prefs.getString(KEY_USER, "") ?: ""
     val savedPassword: String get() = prefs.getString(KEY_PASS, "") ?: ""
@@ -52,9 +63,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val client = WebDavClient(serverUrl, username, password)
         viewModelScope.launch {
             try {
-                val list = withContext(Dispatchers.IO) { client.listDirectory("/") }
+                // List the user-configured URL itself (which may include a
+                // sub-path like ".../music"), not a hardcoded "/" -- the
+                // configured sub-path IS the root of this session.
+                val list = withContext(Dispatchers.IO) { client.listDirectory(serverUrl) }
+                rootUrl = serverUrl
                 connectionState = ConnectionState.Connected(client)
-                currentPath = "/"
+                pathStack = emptyList()
+                currentHref = null
+                currentPath = client.rootPath()
                 entries = list
                 saveServerSettings(serverUrl, username, password)
             } catch (e: Exception) {
@@ -72,7 +89,35 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             try {
                 val list = withContext(Dispatchers.IO) { state.client.listDirectory(resource.href) }
+                pathStack = pathStack + currentHref
+                currentHref = resource.href
                 currentPath = resource.href
+                entries = list
+            } catch (e: Exception) {
+                errorMessage = e.message ?: "Failed to load directory"
+            } finally {
+                isLoading = false
+            }
+        }
+    }
+
+    /** Goes back to the parent of the currently displayed folder. */
+    fun goUp() {
+        val state = connectionState
+        if (state !is ConnectionState.Connected || pathStack.isEmpty()) return
+        val parentHref = pathStack.last()
+        val newStack = pathStack.dropLast(1)
+        isLoading = true
+        errorMessage = null
+        infoMessage = null
+        viewModelScope.launch {
+            try {
+                val list = withContext(Dispatchers.IO) {
+                    state.client.listDirectory(parentHref ?: rootUrl)
+                }
+                pathStack = newStack
+                currentHref = parentHref
+                currentPath = parentHref ?: state.client.rootPath()
                 entries = list
             } catch (e: Exception) {
                 errorMessage = e.message ?: "Failed to load directory"
@@ -124,6 +169,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         connectionState = ConnectionState.Disconnected
         entries = emptyList()
         currentPath = "/"
+        currentHref = null
+        pathStack = emptyList()
         playlist = emptyList()
         playlistIndex = 0
     }

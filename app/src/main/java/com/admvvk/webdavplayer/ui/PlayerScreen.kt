@@ -22,8 +22,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -34,12 +32,16 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.Tracks
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
@@ -50,9 +52,9 @@ import com.admvvk.webdavplayer.webdav.WebDavResource
 /**
  * Plays a queue of media resources (one file, or a whole folder's worth)
  * from the WebDAV server using Media3/ExoPlayer, with Prev/Play-Pause/
- * Stop/Next/Exit controls.
+ * Stop/Next/Exit controls. Shows tag data (title/album) instead of the
+ * raw filename, and technical format info below the artwork.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @SuppressLint("UnsafeOptInUsageError")
 @Composable
 fun PlayerScreen(
@@ -69,6 +71,14 @@ fun PlayerScreen(
     // Surfaced instead of letting the player sit silently "stuck" on a
     // network/decoder error with no feedback to the user.
     var playerError by remember { mutableStateOf<String?>(null) }
+
+    // Tag data read from the file itself (ID3/FLAC/OGG comments etc, parsed
+    // by Media3), falling back to the filename when a track has no title
+    // tag. Technical info (codec/sample rate/bitrate) comes from the
+    // selected audio track's Format once the player has started decoding.
+    var tagTitle by remember { mutableStateOf<String?>(null) }
+    var tagAlbum by remember { mutableStateOf<String?>(null) }
+    var techInfo by remember { mutableStateOf<String?>(null) }
 
     val player = remember {
         val httpDataSourceFactory = DefaultHttpDataSource.Factory()
@@ -98,6 +108,28 @@ fun PlayerScreen(
                             index += 1
                         }
                     }
+
+                    override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) {
+                        tagTitle = mediaMetadata.title?.toString()
+                        tagAlbum = mediaMetadata.albumTitle?.toString()
+                    }
+
+                    override fun onTracksChanged(tracks: Tracks) {
+                        val format = tracks.groups
+                            .firstOrNull { it.type == C.TRACK_TYPE_AUDIO }
+                            ?.let { group ->
+                                (0 until group.length).firstOrNull { group.isTrackSelected(it) }
+                                    ?.let { group.getTrackFormat(it) }
+                            }
+                        techInfo = format?.let { fmt ->
+                            val codec = fmt.sampleMimeType?.removePrefix("audio/")?.uppercase()
+                            val sampleRate = if (fmt.sampleRate > 0) "${fmt.sampleRate} Hz" else null
+                            val bitrate = if (fmt.bitrate > 0) "${fmt.bitrate / 1000} kbps" else null
+                            listOfNotNull(codec, sampleRate, bitrate)
+                                .joinToString(" · ")
+                                .ifBlank { null }
+                        }
+                    }
                 })
             }
     }
@@ -106,6 +138,9 @@ fun PlayerScreen(
     // of recreating the player (keeps the control bar/listener stable).
     LaunchedEffect(index) {
         playerError = null
+        tagTitle = null
+        tagAlbum = null
+        techInfo = null
         val resource = playlist.getOrNull(index) ?: return@LaunchedEffect
         val url = resolveUrl(resource.href)
         player.setMediaItem(MediaItem.fromUri(url))
@@ -118,13 +153,26 @@ fun PlayerScreen(
     }
 
     val current = playlist.getOrNull(index)
+    val displayTitle = tagTitle?.takeIf { it.isNotBlank() } ?: current?.displayName.orEmpty()
 
-    Scaffold(
-        topBar = {
-            TopAppBar(title = { Text(current?.displayName.orEmpty()) })
-        },
-    ) { padding ->
+    Scaffold { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+                Text(
+                    text = displayTitle,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                val album = tagAlbum
+                if (!album.isNullOrBlank()) {
+                    Text(
+                        text = album,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline,
+                    )
+                }
+            }
+
             Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
                 AndroidView(
                     modifier = Modifier.fillMaxSize(),
@@ -144,6 +192,17 @@ fun PlayerScreen(
                         modifier = Modifier.align(Alignment.TopCenter).padding(12.dp),
                     )
                 }
+            }
+
+            val tech = techInfo
+            if (!tech.isNullOrBlank()) {
+                Text(
+                    text = tech,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.outline,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+                )
             }
 
             Surface {

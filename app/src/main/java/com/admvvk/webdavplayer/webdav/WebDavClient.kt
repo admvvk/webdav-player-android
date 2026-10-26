@@ -24,12 +24,36 @@ class WebDavClient(
 
     fun authHeader(): String = Credentials.basic(username, password)
 
-    /** Builds a full URL for a path relative to [baseUrl]. */
+    /**
+     * Builds a full URL for [path].
+     *
+     * WebDAV servers return `<href>` values as paths *absolute to the
+     * server's document root* (e.g. "/music/Artist/Album/"), not relative
+     * to whatever sub-path the user configured as [baseUrl]. So an
+     * absolute path is resolved against the origin (scheme+host) only --
+     * resolving it against the full [baseUrl] would double up [baseUrl]'s
+     * own sub-path the next time an already-absolute href is passed back
+     * in (e.g. baseUrl=".../music" + href="/music/Artist/" would wrongly
+     * become ".../music/music/Artist/", 404-ing every folder and file
+     * below the configured sub-path).
+     */
     fun resolve(path: String): String {
         if (path.startsWith("http://") || path.startsWith("https://")) return path
-        val base = baseUrl.trimEnd('/')
-        val rel = path.trimStart('/')
-        return "$base/$rel"
+        val origin = originOf(baseUrl)
+        val absolutePath = if (path.startsWith("/")) path else "/$path"
+        return origin + absolutePath
+    }
+
+    /** The path component of [baseUrl] (e.g. "/music"), for display. */
+    fun rootPath(): String =
+        runCatching { baseUrl.toHttpUrl().encodedPath.ifEmpty { "/" } }.getOrDefault("/")
+
+    private fun originOf(url: String): String {
+        val parsed = runCatching { url.toHttpUrl() }.getOrNull()
+            ?: return url.substringBefore("/", missingDelimiterValue = url)
+        val defaultPort = if (parsed.scheme == "https") 443 else 80
+        val portSuffix = if (parsed.port != defaultPort) ":${parsed.port}" else ""
+        return "${parsed.scheme}://${parsed.host}$portSuffix"
     }
 
     private val propfindBody = """
