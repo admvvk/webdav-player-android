@@ -239,12 +239,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             .getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
         val callback = object : ConnectivityManager.NetworkCallback() {
             override fun onAvailable(network: Network) {
-                // The network just came back -- try resuming right away
-                // instead of waiting for the next scheduled backoff retry
-                // (this is exactly the "signal returns the moment the lift
-                // doors open" case).
-                if (playerError != null) {
-                    retryHandler.post { resumeAfterError() }
+                // Fires on a background ConnectivityThread; Compose state
+                // must only be read/written on the main thread, so hop
+                // over before touching playerError/resumeAfterError().
+                retryHandler.post {
+                    if (playerError != null) {
+                        resumeAfterError()
+                    }
                 }
             }
         }
