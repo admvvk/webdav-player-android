@@ -111,7 +111,7 @@ private fun AppNavHost(viewModel: AppViewModel) {
                 currentCacheSizeMb = viewModel.cacheSizeMb,
                 onBack = { navController.popBackStack() },
                 onSave = { mb ->
-                    viewModel.setCacheSizeMb(mb)
+                    viewModel.updateCacheSizeMb(mb)
                     navController.popBackStack()
                 },
             )

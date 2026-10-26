@@ -78,7 +78,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         return cache
     }
 
-    fun setCacheSizeMb(mb: Int) {
+    fun updateCacheSizeMb(mb: Int) {
         val clamped = mb.coerceIn(16, 8192)
         cacheSizeMb = clamped
         prefs.edit().putInt(KEY_CACHE_MB, clamped).apply()
