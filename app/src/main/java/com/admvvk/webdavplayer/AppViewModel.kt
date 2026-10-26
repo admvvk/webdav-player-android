@@ -332,6 +332,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private fun mediaOnly(list: List<WebDavResource>): List<WebDavResource> =
         list.filter { it.isDirectory || it.isPlayable() }
 
+    /**
+     * WebDAV hrefs are percent-encoded (e.g. Cyrillic folder names come
+     * back as "%D0%9C%D1%83..."). [currentPath] is display-only (actual
+     * requests use the raw href), so decode it for a readable title.
+     * '+' is escaped first because URLDecoder treats it as a literal
+     * space (form-encoding behavior), which a URL path does not want.
+     */
+    private fun decodeForDisplay(path: String): String =
+        runCatching { java.net.URLDecoder.decode(path.replace("+", "%2B"), "UTF-8") }.getOrDefault(path)
+
     fun connect(serverUrl: String, username: String, password: String) {
         connectionState = ConnectionState.Connecting
         val client = WebDavClient(serverUrl, username, password)
@@ -345,7 +355,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 connectionState = ConnectionState.Connected(client)
                 pathStack = emptyList()
                 currentHref = null
-                currentPath = client.rootPath()
+                currentPath = decodeForDisplay(client.rootPath())
                 entries = mediaOnly(list)
                 saveServerSettings(serverUrl, username, password)
             } catch (e: Exception) {
@@ -365,7 +375,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 val list = withContext(Dispatchers.IO) { state.client.listDirectory(resource.href) }
                 pathStack = pathStack + currentHref
                 currentHref = resource.href
-                currentPath = resource.href
+                currentPath = decodeForDisplay(resource.href)
                 entries = mediaOnly(list)
             } catch (e: Exception) {
                 errorMessage = e.message ?: "Failed to load directory"
@@ -391,7 +401,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 pathStack = newStack
                 currentHref = parentHref
-                currentPath = parentHref ?: state.client.rootPath()
+                currentPath = decodeForDisplay(parentHref ?: state.client.rootPath())
                 entries = mediaOnly(list)
             } catch (e: Exception) {
                 errorMessage = e.message ?: "Failed to load directory"
