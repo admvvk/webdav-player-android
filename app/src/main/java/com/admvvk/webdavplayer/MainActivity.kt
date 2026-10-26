@@ -24,6 +24,7 @@ import com.admvvk.webdavplayer.ui.FileListScreen
 import com.admvvk.webdavplayer.ui.HomeScreen
 import com.admvvk.webdavplayer.ui.PlayerScreen
 import com.admvvk.webdavplayer.ui.SettingsHomeScreen
+import com.admvvk.webdavplayer.ui.SoundSettingsScreen
 
 class MainActivity : ComponentActivity() {
     private val viewModel: AppViewModel by viewModels()
@@ -92,6 +93,7 @@ private fun AppNavHost(viewModel: AppViewModel) {
                 onBackToHome = backToHome,
                 onServerSettings = { navController.navigate("settings/server") },
                 onConnectionSettings = { navController.navigate("settings/cache") },
+                onSoundSettings = { navController.navigate("settings/sound") },
             )
         }
 
@@ -127,6 +129,17 @@ private fun AppNavHost(viewModel: AppViewModel) {
             )
         }
 
+        composable("settings/sound") {
+            SoundSettingsScreen(
+                currentPreampDb = viewModel.preampDb,
+                onBack = { navController.popBackStack() },
+                onSave = { db ->
+                    viewModel.updatePreampDb(db)
+                    navController.popBackStack()
+                },
+            )
+        }
+
         composable("files") {
             FileListScreen(
                 currentPath = viewModel.currentPath,
@@ -140,13 +153,8 @@ private fun AppNavHost(viewModel: AppViewModel) {
                 onGoUp = { viewModel.goUp() },
                 onOpenDirectory = { viewModel.openDirectory(it) },
                 onPlayFile = { resource ->
-                    viewModel.playSingleFile(resource)
+                    viewModel.playFromFile(resource)
                     navController.navigate("player")
-                },
-                onPlayFolder = { resource ->
-                    viewModel.playFolder(resource) {
-                        navController.navigate("player")
-                    }
                 },
                 onDownloadFile = { resource, uri -> viewModel.downloadFile(resource, uri) },
                 onDownloadFolder = { resource, uri -> viewModel.downloadFolder(resource, uri) },

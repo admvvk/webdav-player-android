@@ -4,7 +4,12 @@ import android.app.Application
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.media.audiofx.LoudnessEnhancer
+import android.net.ConnectivityManager
+import android.net.Network
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.webkit.MimeTypeMap
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -13,6 +18,7 @@ import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.C
+import androidx.media3.common.Format
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
@@ -20,12 +26,18 @@ import androidx.media3.common.Player
 import androidx.media3.common.Tracks
 import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.cache.CacheDataSource
 import androidx.media3.datasource.cache.CacheWriter
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
+import androidx.media3.exoplayer.DefaultLoadControl
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
+import androidx.media3.exoplayer.upstream.DefaultLoadErrorHandlingPolicy
+import androidx.media3.exoplayer.upstream.LoadErrorHandlingPolicy
+import androidx.media3.extractor.metadata.id3.TextInformationFrame
+import androidx.media3.extractor.metadata.vorbis.VorbisComment
 import com.admvvk.webdavplayer.webdav.WebDavClient
 import com.admvvk.webdavplayer.webdav.WebDavResource
 import com.admvvk.webdavplayer.webdav.isPlayable
@@ -33,6 +45,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.IOException
+import kotlin.math.min
+import kotlin.math.pow
 
 sealed interface ConnectionState {
     data object Disconnected : ConnectionState
@@ -104,11 +119,84 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         mediaCache = null
     }
 
+    // --- Sound Settings: ReplayGain (album-level, from tags) + manual preamp ---
+
+    /** User-adjustable trim applied on top of the album ReplayGain, in dB (0 = no change). */
+    var preampDb by mutableStateOf(prefs.getFloat(KEY_PREAMP_DB, 0f))
+
+    fun updatePreampDb(db: Float) {
+        val clamped = db.coerceIn(-15f, 15f)
+        preampDb = clamped
+        prefs.edit().putFloat(KEY_PREAMP_DB, clamped).apply()
+        applyGain()
+    }
+
+    /** Album ReplayGain of the current track (dB), or null if untagged. */
+    private var albumReplayGainDb: Double? = null
+    private var loudnessEnhancer: LoudnessEnhancer? = null
+    private var loudnessEnhancerSessionId: Int = C.AUDIO_SESSION_ID_UNSET
+
+    /**
+     * Applies album ReplayGain (0 dB if the track has no such tag) plus the
+     * user's preamp. Attenuation (<=0 dB total) is done via the player's
+     * own volume control; boosting beyond unity gain needs amplification
+     * that plain volume can't provide (its range is capped at 1.0 / 0 dB),
+     * so positive totals use a [LoudnessEnhancer] attached to the player's
+     * audio session instead -- the standard Android mechanism for this.
+     */
+    private fun applyGain() {
+        val player = exoPlayer ?: return
+        val totalDb = (albumReplayGainDb ?: 0.0) + preampDb
+        if (totalDb <= 0.0) {
+            loudnessEnhancer?.enabled = false
+            player.volume = 10.0.pow(totalDb / 20.0).toFloat().coerceIn(0f, 1f)
+        } else {
+            player.volume = 1f
+            val milliBels = (totalDb * 100).toInt().coerceIn(0, 2000) // cap boost at +20 dB
+            ensureLoudnessEnhancer(player)?.apply {
+                setTargetGain(milliBels)
+                enabled = true
+            }
+        }
+    }
+
+    private fun ensureLoudnessEnhancer(player: ExoPlayer): LoudnessEnhancer? {
+        val sessionId = player.audioSessionId
+        if (sessionId == C.AUDIO_SESSION_ID_UNSET) return null
+        if (sessionId != loudnessEnhancerSessionId || loudnessEnhancer == null) {
+            loudnessEnhancer?.release()
+            loudnessEnhancer = runCatching { LoudnessEnhancer(sessionId) }.getOrNull()
+            loudnessEnhancerSessionId = sessionId
+        }
+        return loudnessEnhancer
+    }
+
+    /** Reads the album ReplayGain tag (ID3 TXXX or Vorbis comment) if present. */
+    private fun extractAlbumReplayGainDb(format: Format): Double? {
+        val metadata = format.metadata ?: return null
+        for (i in 0 until metadata.length()) {
+            val entry = metadata.get(i)
+            val raw = when {
+                entry is TextInformationFrame && entry.id == "TXXX" &&
+                    entry.description?.equals("REPLAYGAIN_ALBUM_GAIN", ignoreCase = true) == true ->
+                    entry.values.firstOrNull()
+                entry is VorbisComment && entry.key.equals("REPLAYGAIN_ALBUM_GAIN", ignoreCase = true) ->
+                    entry.value
+                else -> null
+            }
+            if (raw != null) {
+                return raw.trim().removeSuffix("dB").removeSuffix("DB").trim().toDoubleOrNull()
+            }
+        }
+        return null
+    }
+
     // --- Playback (survives navigation; drives the mini-player + full screen) ---
 
     var playbackPlaylist by mutableStateOf<List<WebDavResource>>(emptyList())
     var playbackIndex by mutableStateOf(0)
     var isPlaying by mutableStateOf(false)
+    var isBuffering by mutableStateOf(false)
     var playerError by mutableStateOf<String?>(null)
     var tagTitle by mutableStateOf<String?>(null)
     var tagAlbum by mutableStateOf<String?>(null)
@@ -134,6 +222,79 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     private var cacheDataSourceFactory: CacheDataSource.Factory? = null
     private var prefetchWriter: CacheWriter? = null
 
+    // --- Resilience: survive brief dropouts (metro tunnels, lifts, ...) ---
+
+    private val retryHandler = Handler(Looper.getMainLooper())
+    private var retryRunnable: Runnable? = null
+    private var retryAttempt = 0
+    private var connectivityCallback: ConnectivityManager.NetworkCallback? = null
+
+    init {
+        registerConnectivityCallback()
+    }
+
+    private fun registerConnectivityCallback() {
+        if (connectivityCallback != null) return
+        val cm = getApplication<Application>()
+            .getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                // The network just came back -- try resuming right away
+                // instead of waiting for the next scheduled backoff retry
+                // (this is exactly the "signal returns the moment the lift
+                // doors open" case).
+                if (playerError != null) {
+                    retryHandler.post { resumeAfterError() }
+                }
+            }
+        }
+        runCatching { cm.registerDefaultNetworkCallback(callback) }
+        connectivityCallback = callback
+    }
+
+    private fun unregisterConnectivityCallback() {
+        val cm = getApplication<Application>()
+            .getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        connectivityCallback?.let { runCatching { cm?.unregisterNetworkCallback(it) } }
+        connectivityCallback = null
+    }
+
+    /** True for transient network errors worth retrying (timeouts, DNS, 5xx, ...). */
+    private fun isRetryableNetworkError(error: PlaybackException): Boolean {
+        var cause: Throwable? = error
+        while (cause != null) {
+            if (cause is HttpDataSource.InvalidResponseCodeException) {
+                return cause.responseCode >= 500
+            }
+            if (cause is IOException) return true
+            cause = cause.cause
+        }
+        return false
+    }
+
+    private fun scheduleRetry() {
+        retryAttempt += 1
+        val delayMs = min(1000L shl min(retryAttempt, 4), 15_000L)
+        retryRunnable?.let { retryHandler.removeCallbacks(it) }
+        val runnable = Runnable { resumeAfterError() }
+        retryRunnable = runnable
+        retryHandler.postDelayed(runnable, delayMs)
+    }
+
+    private fun cancelScheduledRetry() {
+        retryRunnable?.let { retryHandler.removeCallbacks(it) }
+        retryRunnable = null
+    }
+
+    private fun resumeAfterError() {
+        cancelScheduledRetry()
+        val player = exoPlayer ?: return
+        if (playerError == null) return // already recovered (e.g. by the other trigger)
+        playerError = null
+        player.prepare()
+        player.play()
+    }
+
     /** The live player instance, if playback has started (for PlayerView binding). */
     fun getPlayerOrNull(): ExoPlayer? = exoPlayer
 
@@ -152,12 +313,44 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
         cacheDataSourceFactory = cdsFactory
 
+        // Buffer generously ahead so a few seconds without signal (a metro
+        // tunnel, a lift) is absorbed by the buffer and never even reaches
+        // the listener as a stall.
+        val loadControl = DefaultLoadControl.Builder()
+            .setBufferDurationsMs(60_000, 120_000, 2_500, 5_000)
+            .build()
+
+        // Keep retrying transient network errors (timeouts, connection
+        // resets, 5xx) with a capped backoff instead of giving up after a
+        // couple of attempts; genuine client errors (401/403/404) are not
+        // retried so a bad URL/credentials doesn't spin forever.
+        val loadErrorHandlingPolicy = object : DefaultLoadErrorHandlingPolicy() {
+            override fun getRetryDelayMsFor(loadErrorInfo: LoadErrorHandlingPolicy.LoadErrorInfo): Long {
+                val exception = loadErrorInfo.exception
+                if (exception is HttpDataSource.InvalidResponseCodeException &&
+                    exception.responseCode in 400..499
+                ) {
+                    return C.TIME_UNSET // permanent error -- don't hammer it
+                }
+                return min(1000L shl min(loadErrorInfo.errorCount, 4), 8_000L)
+            }
+
+            override fun getMinimumLoadableRetryCount(dataType: Int): Int = Int.MAX_VALUE
+        }
+        val mediaSourceFactory = DefaultMediaSourceFactory(context)
+            .setDataSourceFactory(cdsFactory)
+        mediaSourceFactory.setLoadErrorHandlingPolicy(loadErrorHandlingPolicy)
+
         val player = ExoPlayer.Builder(context)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(context).setDataSourceFactory(cdsFactory))
+            .setMediaSourceFactory(mediaSourceFactory)
+            .setLoadControl(loadControl)
             .build()
         player.addListener(object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
                 playerError = "${error.errorCodeName}: ${error.cause?.message ?: error.message}"
+                if (isRetryableNetworkError(error)) {
+                    scheduleRetry()
+                }
             }
 
             override fun onIsPlayingChanged(playing: Boolean) {
@@ -165,6 +358,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
+                isBuffering = playbackState == Player.STATE_BUFFERING
+                if (playbackState == Player.STATE_READY) {
+                    retryAttempt = 0
+                }
                 if (playbackState == Player.STATE_ENDED && canGoNextTrack) {
                     nextTrack()
                 }
@@ -190,6 +387,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 sampleRateHz = format?.sampleRate?.takeIf { it > 0 }
                 bitrateKbps = format?.bitrate?.takeIf { it > 0 }?.let { it / 1000 }
+                albumReplayGainDb = format?.let { extractAlbumReplayGainDb(it) }
+                applyGain()
+            }
+
+            override fun onAudioSessionIdChanged(audioSessionId: Int) {
+                applyGain()
             }
         })
         exoPlayer = player
@@ -201,18 +404,22 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val resource = currentTrack ?: return
         val player = ensurePlayer() ?: return
 
+        cancelScheduledRetry()
+        retryAttempt = 0
         playerError = null
         tagTitle = null
         tagAlbum = null
         artworkBitmap = null
         sampleRateHz = null
         bitrateKbps = null
+        albumReplayGainDb = null
         prefetchWriter?.cancel()
         prefetchWriter = null
 
         player.setMediaItem(MediaItem.fromUri(c.resolve(resource.href)))
         player.prepare()
         player.playWhenReady = true
+        applyGain()
 
         if (playbackPlaylist.size > 1) {
             val next = playbackPlaylist.getOrNull(playbackIndex + 1)
@@ -241,40 +448,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         loadCurrentTrack()
     }
 
-    /** Starts a single-file playback queue immediately (no network needed). */
-    fun playSingleFile(resource: WebDavResource) {
-        startPlayback(listOf(resource), 0)
-    }
-
     /**
-     * Lists [resource] (a folder) non-recursively, keeps only directly
-     * playable media files (nested sub-folders are NOT included), starts
-     * playback, and invokes [onStarted] once that happens -- it is only
-     * called when at least one playable file was found; otherwise
-     * [infoMessage] ("Отсутствуют медиафайлы") or [errorMessage] is set.
+     * Starts playback at [resource] and continues sequentially through the
+     * rest of the currently displayed folder (in the same order shown),
+     * stopping after the last file -- no looping back to the start. If
+     * [resource] happens to be the last file, only it plays.
      */
-    fun playFolder(resource: WebDavResource, onStarted: () -> Unit) {
-        val state = connectionState
-        if (state !is ConnectionState.Connected) return
-        isLoading = true
-        errorMessage = null
-        infoMessage = null
-        viewModelScope.launch {
-            try {
-                val list = withContext(Dispatchers.IO) { state.client.listDirectory(resource.href) }
-                val playableFiles = list.filter { !it.isDirectory && it.isPlayable() }
-                if (playableFiles.isEmpty()) {
-                    infoMessage = "Отсутствуют медиафайлы"
-                } else {
-                    startPlayback(playableFiles, 0)
-                    onStarted()
-                }
-            } catch (e: Exception) {
-                errorMessage = e.message ?: "Failed to load directory"
-            } finally {
-                isLoading = false
-            }
-        }
+    fun playFromFile(resource: WebDavResource) {
+        val files = entries.filter { !it.isDirectory }
+        val index = files.indexOf(resource)
+        if (index < 0) return
+        startPlayback(files, index)
     }
 
     fun togglePlayPause() {
@@ -302,6 +486,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Fully stops and tears down playback (used when entering Settings). */
     fun stopAndClearPlayback() {
+        cancelScheduledRetry()
         prefetchWriter?.cancel()
         prefetchWriter = null
         exoPlayer?.run {
@@ -310,21 +495,29 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
         exoPlayer = null
         cacheDataSourceFactory = null
+        loudnessEnhancer?.release()
+        loudnessEnhancer = null
+        loudnessEnhancerSessionId = C.AUDIO_SESSION_ID_UNSET
         playbackPlaylist = emptyList()
         playbackIndex = 0
         isPlaying = false
+        isBuffering = false
         playerError = null
         tagTitle = null
         tagAlbum = null
         artworkBitmap = null
         sampleRateHz = null
         bitrateKbps = null
+        albumReplayGainDb = null
     }
 
     override fun onCleared() {
         super.onCleared()
+        unregisterConnectivityCallback()
+        cancelScheduledRetry()
         exoPlayer?.release()
         mediaCache?.release()
+        loudnessEnhancer?.release()
     }
 
     // --- Directory listing / navigation --------------------------------
@@ -436,7 +629,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     /**
      * Downloads every directly-contained playable file of [resource] (a
      * folder) into [treeUri] (from ACTION_OPEN_DOCUMENT_TREE). Nested
-     * sub-folders are not descended into, matching "play folder".
+     * sub-folders are not descended into.
      */
     fun downloadFolder(resource: WebDavResource, treeUri: Uri) {
         val state = connectionState
@@ -511,6 +704,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         private const val KEY_USER = "username"
         private const val KEY_PASS = "password"
         private const val KEY_CACHE_MB = "cache_size_mb"
+        private const val KEY_PREAMP_DB = "preamp_db"
         const val DEFAULT_CACHE_MB = 256
     }
 }

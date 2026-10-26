@@ -8,6 +8,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -30,6 +31,7 @@ fun SettingsHomeScreen(
     onBackToHome: () -> Unit,
     onServerSettings: () -> Unit,
     onConnectionSettings: () -> Unit,
+    onSoundSettings: () -> Unit,
 ) {
     Scaffold(
         topBar = {
@@ -59,6 +61,14 @@ fun SettingsHomeScreen(
                         supportingContent = { Text("Next-track pre-caching for folder playback") },
                         leadingContent = { Icon(Icons.Filled.Tune, contentDescription = null) },
                         modifier = Modifier.clickable(onClick = onConnectionSettings),
+                    )
+                }
+                item {
+                    ListItem(
+                        headlineContent = { Text("Sound Settings") },
+                        supportingContent = { Text("Album ReplayGain + manual preamp (dB)") },
+                        leadingContent = { Icon(Icons.Filled.VolumeUp, contentDescription = null) },
+                        modifier = Modifier.clickable(onClick = onSoundSettings),
                     )
                 }
             }

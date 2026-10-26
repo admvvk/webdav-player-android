@@ -3,8 +3,7 @@ package com.admvvk.webdavplayer.ui
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -27,7 +26,7 @@ import com.admvvk.webdavplayer.AppViewModel
 import com.admvvk.webdavplayer.webdav.WebDavResource
 import com.admvvk.webdavplayer.webdav.isPlayable
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FileListScreen(
     currentPath: String,
@@ -41,15 +40,12 @@ fun FileListScreen(
     onGoUp: () -> Unit,
     onOpenDirectory: (WebDavResource) -> Unit,
     onPlayFile: (WebDavResource) -> Unit,
-    onPlayFolder: (WebDavResource) -> Unit,
     onDownloadFile: (WebDavResource, Uri) -> Unit,
     onDownloadFolder: (WebDavResource, Uri) -> Unit,
     onOpenSettings: () -> Unit,
     playerViewModel: AppViewModel,
     onExpandPlayer: () -> Unit,
 ) {
-    // Which folder's long-press context menu ("Воспроизвести папку") is open.
-    var menuForHref by remember { mutableStateOf<String?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
 
     // One shared SAF launcher per download kind; the pending resource is
@@ -119,63 +115,40 @@ fun FileListScreen(
         Box(modifier = Modifier.padding(padding).fillMaxSize()) {
             LazyColumn {
                 items(entries) { resource ->
-                    Box {
-                        ListItem(
-                            headlineContent = { Text(resource.displayName) },
-                            supportingContent = {
-                                if (!resource.isDirectory) {
-                                    Text(formatSize(resource.contentLength))
-                                }
-                            },
-                            leadingContent = {
-                                Icon(
-                                    imageVector = if (resource.isDirectory) Icons.Filled.Folder else Icons.Filled.InsertDriveFile,
-                                    contentDescription = null,
-                                )
-                            },
-                            trailingContent = {
-                                IconButton(onClick = {
-                                    if (resource.isDirectory) {
-                                        pendingFolderDownload = resource
-                                        openTreeLauncher.launch(null)
-                                    } else {
-                                        pendingFileDownload = resource
-                                        createFileLauncher.launch(resource.displayName)
-                                    }
-                                }) {
-                                    Icon(Icons.Filled.Download, contentDescription = "Download")
-                                }
-                            },
-                            modifier = Modifier.combinedClickable(
-                                onClick = {
-                                    if (resource.isDirectory) {
-                                        onOpenDirectory(resource)
-                                    } else if (resource.isPlayable()) {
-                                        onPlayFile(resource)
-                                    }
-                                },
-                                onLongClick = {
-                                    if (resource.isDirectory) {
-                                        menuForHref = resource.href
-                                    }
-                                },
-                            ),
-                        )
-                        if (resource.isDirectory && menuForHref == resource.href) {
-                            DropdownMenu(
-                                expanded = true,
-                                onDismissRequest = { menuForHref = null },
-                            ) {
-                                DropdownMenuItem(
-                                    text = { Text("Воспроизвести папку") },
-                                    onClick = {
-                                        menuForHref = null
-                                        onPlayFolder(resource)
-                                    },
-                                )
+                    ListItem(
+                        headlineContent = { Text(resource.displayName) },
+                        supportingContent = {
+                            if (!resource.isDirectory) {
+                                Text(formatSize(resource.contentLength))
                             }
-                        }
-                    }
+                        },
+                        leadingContent = {
+                            Icon(
+                                imageVector = if (resource.isDirectory) Icons.Filled.Folder else Icons.Filled.InsertDriveFile,
+                                contentDescription = null,
+                            )
+                        },
+                        trailingContent = {
+                            IconButton(onClick = {
+                                if (resource.isDirectory) {
+                                    pendingFolderDownload = resource
+                                    openTreeLauncher.launch(null)
+                                } else {
+                                    pendingFileDownload = resource
+                                    createFileLauncher.launch(resource.displayName)
+                                }
+                            }) {
+                                Icon(Icons.Filled.Download, contentDescription = "Download")
+                            }
+                        },
+                        modifier = Modifier.clickable {
+                            if (resource.isDirectory) {
+                                onOpenDirectory(resource)
+                            } else if (resource.isPlayable()) {
+                                onPlayFile(resource)
+                            }
+                        },
+                    )
                     Divider()
                 }
             }
