@@ -1,7 +1,6 @@
 package com.admvvk.webdavplayer.ui
 
 import android.annotation.SuppressLint
-import android.net.Uri
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -26,10 +25,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -37,169 +33,48 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.media3.common.C
-import androidx.media3.common.MediaItem
-import androidx.media3.common.MediaMetadata
-import androidx.media3.common.PlaybackException
-import androidx.media3.common.Player
-import androidx.media3.common.Tracks
-import androidx.media3.datasource.DataSpec
-import androidx.media3.datasource.DefaultHttpDataSource
-import androidx.media3.datasource.cache.CacheDataSource
-import androidx.media3.datasource.cache.CacheWriter
-import androidx.media3.datasource.cache.SimpleCache
-import androidx.media3.exoplayer.ExoPlayer
-import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
+import com.admvvk.webdavplayer.AppViewModel
 import com.admvvk.webdavplayer.R
-import com.admvvk.webdavplayer.webdav.WebDavResource
 
 /**
- * Plays a queue of media resources (one file, or a whole folder's worth)
- * from the WebDAV server using Media3/ExoPlayer, with Prev/Play-Pause/
- * Stop/Next/Exit controls. Shows tag data (title/album) instead of the
- * raw filename, and technical format info below the artwork. When playing
- * a folder queue (more than one track), the next track is opportunistically
- * pre-downloaded into [cache] so a weak-signal patch doesn't stall it.
+ * Full-size player UI. Playback itself (the ExoPlayer instance and its
+ * state) lives in [viewModel] so it survives "Exit to list" and back --
+ * this screen is just a view onto that state plus Prev/Play-Pause/Stop/
+ * Next/Exit controls.
  */
 @SuppressLint("UnsafeOptInUsageError")
 @Composable
 fun PlayerScreen(
-    playlist: List<WebDavResource>,
-    startIndex: Int,
-    resolveUrl: (String) -> String,
-    authHeader: String,
-    cache: SimpleCache,
+    viewModel: AppViewModel,
     onExit: () -> Unit,
 ) {
     val context = LocalContext.current
 
-    var index by remember { mutableStateOf(startIndex.coerceIn(0, (playlist.size - 1).coerceAtLeast(0))) }
-    var isPlaying by remember { mutableStateOf(true) }
-    // Surfaced instead of letting the player sit silently "stuck" on a
-    // network/decoder error with no feedback to the user.
-    var playerError by remember { mutableStateOf<String?>(null) }
-
-    // Tag data read from the file itself (ID3/FLAC/OGG comments etc, parsed
-    // by Media3), falling back to the filename when a track has no title
-    // tag. Technical info (codec/sample rate/bitrate) comes from the
-    // selected audio track's Format once the player has started decoding.
-    var tagTitle by remember { mutableStateOf<String?>(null) }
-    var tagAlbum by remember { mutableStateOf<String?>(null) }
-    var techInfo by remember { mutableStateOf<String?>(null) }
-
-    // The one in-flight "pre-fetch the next track" job, if any -- cancelled
-    // whenever we move on so we don't keep downloading something stale.
-    var prefetchWriter by remember { mutableStateOf<CacheWriter?>(null) }
-
-    val cacheDataSourceFactory = remember {
-        val httpDataSourceFactory = DefaultHttpDataSource.Factory()
-            .setDefaultRequestProperties(mapOf("Authorization" to authHeader))
-            // Be generous with slow/large files (e.g. big FLAC/WAV over a
-            // slow link) instead of timing out and looking "stuck".
-            .setConnectTimeoutMs(15_000)
-            .setReadTimeoutMs(15_000)
-            .setAllowCrossProtocolRedirects(true)
-        CacheDataSource.Factory()
-            .setCache(cache)
-            .setUpstreamDataSourceFactory(httpDataSourceFactory)
-            .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+    // If somehow reached with nothing playing (e.g. process restored into
+    // a stale back stack), just bail out instead of showing an empty shell.
+    LaunchedEffect(viewModel.hasActiveTrack) {
+        if (!viewModel.hasActiveTrack) onExit()
     }
 
-    val player = remember {
-        ExoPlayer.Builder(context)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(context).setDataSourceFactory(cacheDataSourceFactory))
-            .build()
-            .apply {
-                addListener(object : Player.Listener {
-                    override fun onPlayerError(error: PlaybackException) {
-                        playerError = "${error.errorCodeName}: ${error.cause?.message ?: error.message}"
-                    }
-
-                    override fun onIsPlayingChanged(playing: Boolean) {
-                        isPlaying = playing
-                    }
-
-                    override fun onPlaybackStateChanged(playbackState: Int) {
-                        // Auto-advance when playing a folder queue.
-                        if (playbackState == Player.STATE_ENDED && index < playlist.lastIndex) {
-                            index += 1
-                        }
-                    }
-
-                    override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) {
-                        tagTitle = mediaMetadata.title?.toString()
-                        tagAlbum = mediaMetadata.albumTitle?.toString()
-                    }
-
-                    override fun onTracksChanged(tracks: Tracks) {
-                        val format = tracks.groups
-                            .firstOrNull { it.type == C.TRACK_TYPE_AUDIO }
-                            ?.let { group ->
-                                (0 until group.length).firstOrNull { group.isTrackSelected(it) }
-                                    ?.let { group.getTrackFormat(it) }
-                            }
-                        techInfo = format?.let { fmt ->
-                            val codec = fmt.sampleMimeType?.removePrefix("audio/")?.uppercase()
-                            val sampleRate = if (fmt.sampleRate > 0) "${fmt.sampleRate} Hz" else null
-                            val bitrate = if (fmt.bitrate > 0) "${fmt.bitrate / 1000} kbps" else null
-                            listOfNotNull(codec, sampleRate, bitrate)
-                                .joinToString(" · ")
-                                .ifBlank { null }
-                        }
-                    }
-                })
-            }
-    }
-
-    // (Re)load the media item whenever the queue position changes, instead
-    // of recreating the player (keeps the control bar/listener stable).
-    // Also kicks off (best-effort) pre-caching of the *next* track when
-    // playing a multi-track folder queue.
-    LaunchedEffect(index) {
-        playerError = null
-        tagTitle = null
-        tagAlbum = null
-        techInfo = null
-
-        prefetchWriter?.cancel()
-        prefetchWriter = null
-
-        val resource = playlist.getOrNull(index) ?: return@LaunchedEffect
-        val url = resolveUrl(resource.href)
-        player.setMediaItem(MediaItem.fromUri(url))
-        player.prepare()
-        player.playWhenReady = true
-
-        if (playlist.size > 1) {
-            val next = playlist.getOrNull(index + 1)
-            if (next != null) {
-                val nextUrl = resolveUrl(next.href)
-                val dataSource = cacheDataSourceFactory.createDataSource()
-                val dataSpec = DataSpec(Uri.parse(nextUrl))
-                val writer = CacheWriter(dataSource, dataSpec, null, null)
-                prefetchWriter = writer
-                Thread {
-                    try {
-                        writer.cache()
-                    } catch (e: Exception) {
-                        // Best-effort pre-fetch; playback itself will just
-                        // fetch normally if this didn't finish in time.
-                    }
-                }.start()
-            }
-        }
-    }
+    val current = viewModel.currentTrack
+    val displayTitle = viewModel.tagTitle?.takeIf { it.isNotBlank() } ?: current?.displayName.orEmpty()
+    val album = viewModel.tagAlbum
+    val tech = viewModel.techInfoText()
+    val error = viewModel.playerError
+    val playerView = remember { PlayerView(context) }
 
     DisposableEffect(Unit) {
+        playerView.useController = false
+        playerView.defaultArtwork = ContextCompat.getDrawable(context, R.drawable.ic_music_placeholder)
+        playerView.player = viewModel.getPlayerOrNull()
         onDispose {
-            prefetchWriter?.cancel()
-            player.release()
+            // The ExoPlayer instance is owned by the ViewModel and keeps
+            // playing after we leave -- only detach this View from it so
+            // the View isn't kept alive by the player's listener list.
+            playerView.player = null
         }
     }
-
-    val current = playlist.getOrNull(index)
-    val displayTitle = tagTitle?.takeIf { it.isNotBlank() } ?: current?.displayName.orEmpty()
 
     Scaffold { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding)) {
@@ -209,7 +84,6 @@ fun PlayerScreen(
                     style = MaterialTheme.typography.titleMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                val album = tagAlbum
                 if (!album.isNullOrBlank()) {
                     Text(
                         text = album,
@@ -220,17 +94,7 @@ fun PlayerScreen(
             }
 
             Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
-                AndroidView(
-                    modifier = Modifier.fillMaxSize(),
-                    factory = {
-                        PlayerView(context).apply {
-                            this.player = player
-                            this.useController = false
-                            this.defaultArtwork = ContextCompat.getDrawable(context, R.drawable.ic_music_placeholder)
-                        }
-                    },
-                )
-                val error = playerError
+                AndroidView(modifier = Modifier.fillMaxSize(), factory = { playerView })
                 if (error != null) {
                     Text(
                         text = error,
@@ -240,7 +104,6 @@ fun PlayerScreen(
                 }
             }
 
-            val tech = techInfo
             if (!tech.isNullOrBlank()) {
                 Text(
                     text = tech,
@@ -256,30 +119,22 @@ fun PlayerScreen(
                     modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
                     horizontalArrangement = androidx.compose.foundation.layout.Arrangement.Center,
                 ) {
-                    IconButton(onClick = { if (index > 0) index -= 1 }, enabled = index > 0) {
+                    IconButton(onClick = viewModel::prevTrack, enabled = viewModel.canGoPrevTrack) {
                         Icon(Icons.Filled.SkipPrevious, contentDescription = "Prev")
                     }
                     Spacer(Modifier.width(8.dp))
-                    IconButton(onClick = {
-                        if (player.isPlaying) player.pause() else player.play()
-                    }) {
+                    IconButton(onClick = viewModel::togglePlayPause) {
                         Icon(
-                            if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                            if (viewModel.isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
                             contentDescription = "Play/Pause",
                         )
                     }
                     Spacer(Modifier.width(8.dp))
-                    IconButton(onClick = {
-                        player.pause()
-                        player.seekTo(0)
-                    }) {
+                    IconButton(onClick = viewModel::stopToBeginning) {
                         Icon(Icons.Filled.Stop, contentDescription = "Stop")
                     }
                     Spacer(Modifier.width(8.dp))
-                    IconButton(
-                        onClick = { if (index < playlist.lastIndex) index += 1 },
-                        enabled = index < playlist.lastIndex,
-                    ) {
+                    IconButton(onClick = viewModel::nextTrack, enabled = viewModel.canGoNextTrack) {
                         Icon(Icons.Filled.SkipNext, contentDescription = "Next")
                     }
                     Spacer(Modifier.width(8.dp))

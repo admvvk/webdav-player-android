@@ -2,6 +2,8 @@ package com.admvvk.webdavplayer
 
 import android.app.Application
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.webkit.MimeTypeMap
 import androidx.compose.runtime.getValue
@@ -10,8 +12,20 @@ import androidx.compose.runtime.setValue
 import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.media3.common.C
+import androidx.media3.common.MediaItem
+import androidx.media3.common.MediaMetadata
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.common.Tracks
+import androidx.media3.datasource.DataSpec
+import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.cache.CacheDataSource
+import androidx.media3.datasource.cache.CacheWriter
 import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
 import androidx.media3.datasource.cache.SimpleCache
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import com.admvvk.webdavplayer.webdav.WebDavClient
 import com.admvvk.webdavplayer.webdav.WebDavResource
 import com.admvvk.webdavplayer.webdav.isPlayable
@@ -32,6 +46,10 @@ sealed interface ConnectionState {
  * SharedPreferences, so the user does not have to retype them every launch.
  * NOTE: the password is stored in plaintext in the app's private storage
  * (not encrypted) -- fine for a personal/test client, not for a hardened app.
+ *
+ * Playback (the ExoPlayer instance and its state) also lives here rather
+ * than in PlayerScreen, so navigating "Exit to list" and back doesn't tear
+ * the player down -- the file list shows a persistent mini-player instead.
  */
 class AppViewModel(application: Application) : AndroidViewModel(application) {
     private val prefs = application.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -44,10 +62,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     /** Transient, non-error info banner (e.g. "no media files in this folder"). */
     var infoMessage by mutableStateOf<String?>(null)
-
-    /** Current playback queue and position within it, consumed by PlayerScreen. */
-    var playlist by mutableStateOf<List<WebDavResource>>(emptyList())
-    var playlistIndex by mutableStateOf(0)
 
     // The configured root (whatever URL the user entered in settings, which
     // may itself point at a sub-folder like ".../music"). `currentHref` is
@@ -64,13 +78,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val savedUsername: String get() = prefs.getString(KEY_USER, "") ?: ""
     val savedPassword: String get() = prefs.getString(KEY_PASS, "") ?: ""
 
+    private fun client(): WebDavClient? = (connectionState as? ConnectionState.Connected)?.client
+
     // --- Next-track pre-caching (Connection Settings) -----------------
 
     var cacheSizeMb by mutableStateOf(prefs.getInt(KEY_CACHE_MB, DEFAULT_CACHE_MB))
     private var mediaCache: SimpleCache? = null
 
-    /** The shared on-disk cache used by PlayerScreen's CacheDataSource. */
-    fun getOrCreateCache(): SimpleCache {
+    private fun getOrCreateCache(): SimpleCache {
         mediaCache?.let { return it }
         val dir = File(getApplication<Application>().cacheDir, "media_cache")
         val cache = SimpleCache(dir, LeastRecentlyUsedCacheEvictor(cacheSizeMb * 1024L * 1024L))
@@ -84,10 +99,232 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         prefs.edit().putInt(KEY_CACHE_MB, clamped).apply()
         // The cache size (evictor limit) is fixed at construction time, so
         // changing it means recreating the cache. Only safe to do when no
-        // player currently holds a DataSource backed by the old instance,
-        // which in practice means "not while the player screen is open".
+        // player currently holds a DataSource backed by the old instance.
         mediaCache?.release()
         mediaCache = null
+    }
+
+    // --- Playback (survives navigation; drives the mini-player + full screen) ---
+
+    var playbackPlaylist by mutableStateOf<List<WebDavResource>>(emptyList())
+    var playbackIndex by mutableStateOf(0)
+    var isPlaying by mutableStateOf(false)
+    var playerError by mutableStateOf<String?>(null)
+    var tagTitle by mutableStateOf<String?>(null)
+    var tagAlbum by mutableStateOf<String?>(null)
+    var artworkBitmap by mutableStateOf<Bitmap?>(null)
+    private var sampleRateHz by mutableStateOf<Int?>(null)
+    private var bitrateKbps by mutableStateOf<Int?>(null)
+
+    val hasActiveTrack: Boolean get() = playbackPlaylist.isNotEmpty()
+    val currentTrack: WebDavResource? get() = playbackPlaylist.getOrNull(playbackIndex)
+    val canGoPrevTrack: Boolean get() = playbackIndex > 0
+    val canGoNextTrack: Boolean get() = playbackIndex < playbackPlaylist.lastIndex
+
+    /** "ext · sampleRate · bitrate", e.g. "mp3 · 44100 Hz · 128 kbps". */
+    fun techInfoText(): String? {
+        val ext = currentTrack?.displayName?.substringAfterLast('.', "")
+            ?.lowercase()?.takeIf { it.isNotBlank() }
+        val sr = sampleRateHz?.let { "$it Hz" }
+        val br = bitrateKbps?.let { "$it kbps" }
+        return listOfNotNull(ext, sr, br).joinToString(" · ").ifBlank { null }
+    }
+
+    private var exoPlayer: ExoPlayer? = null
+    private var cacheDataSourceFactory: CacheDataSource.Factory? = null
+    private var prefetchWriter: CacheWriter? = null
+
+    /** The live player instance, if playback has started (for PlayerView binding). */
+    fun getPlayerOrNull(): ExoPlayer? = exoPlayer
+
+    private fun ensurePlayer(): ExoPlayer? {
+        exoPlayer?.let { return it }
+        val c = client() ?: return null
+        val context = getApplication<Application>()
+        val httpDataSourceFactory = DefaultHttpDataSource.Factory()
+            .setDefaultRequestProperties(mapOf("Authorization" to c.authHeader()))
+            .setConnectTimeoutMs(15_000)
+            .setReadTimeoutMs(15_000)
+            .setAllowCrossProtocolRedirects(true)
+        val cdsFactory = CacheDataSource.Factory()
+            .setCache(getOrCreateCache())
+            .setUpstreamDataSourceFactory(httpDataSourceFactory)
+            .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+        cacheDataSourceFactory = cdsFactory
+
+        val player = ExoPlayer.Builder(context)
+            .setMediaSourceFactory(DefaultMediaSourceFactory(context).setDataSourceFactory(cdsFactory))
+            .build()
+        player.addListener(object : Player.Listener {
+            override fun onPlayerError(error: PlaybackException) {
+                playerError = "${error.errorCodeName}: ${error.cause?.message ?: error.message}"
+            }
+
+            override fun onIsPlayingChanged(playing: Boolean) {
+                isPlaying = playing
+            }
+
+            override fun onPlaybackStateChanged(playbackState: Int) {
+                if (playbackState == Player.STATE_ENDED && canGoNextTrack) {
+                    nextTrack()
+                }
+            }
+
+            override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) {
+                tagTitle = mediaMetadata.title?.toString()
+                tagAlbum = mediaMetadata.albumTitle?.toString()
+                val data = mediaMetadata.artworkData
+                artworkBitmap = if (data != null) {
+                    runCatching { BitmapFactory.decodeByteArray(data, 0, data.size) }.getOrNull()
+                } else {
+                    null
+                }
+            }
+
+            override fun onTracksChanged(tracks: Tracks) {
+                val format = tracks.groups
+                    .firstOrNull { it.type == C.TRACK_TYPE_AUDIO }
+                    ?.let { group ->
+                        (0 until group.length).firstOrNull { group.isTrackSelected(it) }
+                            ?.let { group.getTrackFormat(it) }
+                    }
+                sampleRateHz = format?.sampleRate?.takeIf { it > 0 }
+                bitrateKbps = format?.bitrate?.takeIf { it > 0 }?.let { it / 1000 }
+            }
+        })
+        exoPlayer = player
+        return player
+    }
+
+    private fun loadCurrentTrack() {
+        val c = client() ?: return
+        val resource = currentTrack ?: return
+        val player = ensurePlayer() ?: return
+
+        playerError = null
+        tagTitle = null
+        tagAlbum = null
+        artworkBitmap = null
+        sampleRateHz = null
+        bitrateKbps = null
+        prefetchWriter?.cancel()
+        prefetchWriter = null
+
+        player.setMediaItem(MediaItem.fromUri(c.resolve(resource.href)))
+        player.prepare()
+        player.playWhenReady = true
+
+        if (playbackPlaylist.size > 1) {
+            val next = playbackPlaylist.getOrNull(playbackIndex + 1)
+            val factory = cacheDataSourceFactory
+            if (next != null && factory != null) {
+                val dataSource = factory.createDataSource()
+                val dataSpec = DataSpec(Uri.parse(c.resolve(next.href)))
+                val writer = CacheWriter(dataSource, dataSpec, null, null)
+                prefetchWriter = writer
+                Thread {
+                    try {
+                        writer.cache()
+                    } catch (e: Exception) {
+                        // Best-effort pre-fetch; normal playback fetches if this
+                        // didn't finish in time.
+                    }
+                }.start()
+            }
+        }
+    }
+
+    private fun startPlayback(queue: List<WebDavResource>, index: Int) {
+        if (queue.isEmpty()) return
+        playbackPlaylist = queue
+        playbackIndex = index.coerceIn(0, queue.lastIndex)
+        loadCurrentTrack()
+    }
+
+    /** Starts a single-file playback queue immediately (no network needed). */
+    fun playSingleFile(resource: WebDavResource) {
+        startPlayback(listOf(resource), 0)
+    }
+
+    /**
+     * Lists [resource] (a folder) non-recursively, keeps only directly
+     * playable media files (nested sub-folders are NOT included), starts
+     * playback, and invokes [onStarted] once that happens -- it is only
+     * called when at least one playable file was found; otherwise
+     * [infoMessage] ("Отсутствуют медиафайлы") or [errorMessage] is set.
+     */
+    fun playFolder(resource: WebDavResource, onStarted: () -> Unit) {
+        val state = connectionState
+        if (state !is ConnectionState.Connected) return
+        isLoading = true
+        errorMessage = null
+        infoMessage = null
+        viewModelScope.launch {
+            try {
+                val list = withContext(Dispatchers.IO) { state.client.listDirectory(resource.href) }
+                val playableFiles = list.filter { !it.isDirectory && it.isPlayable() }
+                if (playableFiles.isEmpty()) {
+                    infoMessage = "Отсутствуют медиафайлы"
+                } else {
+                    startPlayback(playableFiles, 0)
+                    onStarted()
+                }
+            } catch (e: Exception) {
+                errorMessage = e.message ?: "Failed to load directory"
+            } finally {
+                isLoading = false
+            }
+        }
+    }
+
+    fun togglePlayPause() {
+        exoPlayer?.let { if (it.isPlaying) it.pause() else it.play() }
+    }
+
+    fun stopToBeginning() {
+        exoPlayer?.pause()
+        exoPlayer?.seekTo(0)
+    }
+
+    fun nextTrack() {
+        if (canGoNextTrack) {
+            playbackIndex += 1
+            loadCurrentTrack()
+        }
+    }
+
+    fun prevTrack() {
+        if (canGoPrevTrack) {
+            playbackIndex -= 1
+            loadCurrentTrack()
+        }
+    }
+
+    /** Fully stops and tears down playback (used when entering Settings). */
+    fun stopAndClearPlayback() {
+        prefetchWriter?.cancel()
+        prefetchWriter = null
+        exoPlayer?.run {
+            stop()
+            release()
+        }
+        exoPlayer = null
+        cacheDataSourceFactory = null
+        playbackPlaylist = emptyList()
+        playbackIndex = 0
+        isPlaying = false
+        playerError = null
+        tagTitle = null
+        tagAlbum = null
+        artworkBitmap = null
+        sampleRateHz = null
+        bitrateKbps = null
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        exoPlayer?.release()
+        mediaCache?.release()
     }
 
     // --- Directory listing / navigation --------------------------------
@@ -156,44 +393,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 currentHref = parentHref
                 currentPath = parentHref ?: state.client.rootPath()
                 entries = mediaOnly(list)
-            } catch (e: Exception) {
-                errorMessage = e.message ?: "Failed to load directory"
-            } finally {
-                isLoading = false
-            }
-        }
-    }
-
-    /** Starts a single-file playback queue immediately (no network needed). */
-    fun playSingleFile(resource: WebDavResource) {
-        playlist = listOf(resource)
-        playlistIndex = 0
-    }
-
-    /**
-     * Lists [resource] (a folder) non-recursively, keeps only directly
-     * playable media files (nested sub-folders are NOT included), and
-     * invokes [onResult] with the queue once loaded -- it is only called
-     * when at least one playable file was found; otherwise [infoMessage]
-     * ("Отсутствуют медиафайлы") or [errorMessage] is set instead.
-     */
-    fun playFolder(resource: WebDavResource, onResult: (List<WebDavResource>) -> Unit) {
-        val state = connectionState
-        if (state !is ConnectionState.Connected) return
-        isLoading = true
-        errorMessage = null
-        infoMessage = null
-        viewModelScope.launch {
-            try {
-                val list = withContext(Dispatchers.IO) { state.client.listDirectory(resource.href) }
-                val playableFiles = list.filter { !it.isDirectory && it.isPlayable() }
-                if (playableFiles.isEmpty()) {
-                    infoMessage = "Отсутствуют медиафайлы"
-                } else {
-                    playlist = playableFiles
-                    playlistIndex = 0
-                    onResult(playableFiles)
-                }
             } catch (e: Exception) {
                 errorMessage = e.message ?: "Failed to load directory"
             } finally {
@@ -280,13 +479,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun disconnect() {
+        stopAndClearPlayback()
         connectionState = ConnectionState.Disconnected
         entries = emptyList()
         currentPath = "/"
         currentHref = null
         pathStack = emptyList()
-        playlist = emptyList()
-        playlistIndex = 0
     }
 
     private fun saveServerSettings(serverUrl: String, username: String, password: String) {

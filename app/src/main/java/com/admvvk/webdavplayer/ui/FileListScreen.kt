@@ -13,6 +13,7 @@ import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.InsertDriveFile
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -22,6 +23,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import com.admvvk.webdavplayer.AppViewModel
 import com.admvvk.webdavplayer.webdav.WebDavResource
 import com.admvvk.webdavplayer.webdav.isPlayable
 
@@ -42,7 +44,9 @@ fun FileListScreen(
     onPlayFolder: (WebDavResource) -> Unit,
     onDownloadFile: (WebDavResource, Uri) -> Unit,
     onDownloadFolder: (WebDavResource, Uri) -> Unit,
-    onDisconnect: () -> Unit,
+    onOpenSettings: () -> Unit,
+    playerViewModel: AppViewModel,
+    onExpandPlayer: () -> Unit,
 ) {
     // Which folder's long-press context menu ("Воспроизвести папку") is open.
     var menuForHref by remember { mutableStateOf<String?>(null) }
@@ -99,11 +103,18 @@ fun FileListScreen(
                     }
                 },
                 actions = {
-                    TextButton(onClick = onDisconnect) { Text("Disconnect") }
+                    IconButton(onClick = onOpenSettings) {
+                        Icon(Icons.Filled.Settings, contentDescription = "Settings")
+                    }
                 },
             )
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
+        bottomBar = {
+            if (playerViewModel.hasActiveTrack) {
+                MiniPlayerBar(playerViewModel, onExpand = onExpandPlayer)
+            }
+        },
     ) { padding ->
         Box(modifier = Modifier.padding(padding).fillMaxSize()) {
             LazyColumn {

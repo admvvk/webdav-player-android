@@ -44,6 +44,15 @@ class MainActivity : ComponentActivity() {
 private fun AppNavHost(viewModel: AppViewModel) {
     val navController: NavHostController = rememberNavController()
 
+    // Entering Settings always stops any active playback first.
+    val openSettings: () -> Unit = {
+        viewModel.stopAndClearPlayback()
+        navController.navigate("settings")
+    }
+    val backToHome: () -> Unit = {
+        navController.navigate("home") { popUpTo("home") { inclusive = true } }
+    }
+
     NavHost(navController = navController, startDestination = "home") {
         composable("home") {
             // `attemptingConnect` scopes the auto-navigate-once-connected
@@ -63,7 +72,7 @@ private fun AppNavHost(viewModel: AppViewModel) {
             HomeScreen(
                 isConnecting = state is ConnectionState.Connecting,
                 errorMessage = (state as? ConnectionState.Error)?.message,
-                onOpenSettings = { navController.navigate("settings") },
+                onOpenSettings = openSettings,
                 onOpenPlayer = {
                     when {
                         state is ConnectionState.Connected -> navController.navigate("files")
@@ -80,6 +89,7 @@ private fun AppNavHost(viewModel: AppViewModel) {
         composable("settings") {
             SettingsHomeScreen(
                 onBack = { navController.popBackStack() },
+                onBackToHome = backToHome,
                 onServerSettings = { navController.navigate("settings/server") },
                 onConnectionSettings = { navController.navigate("settings/cache") },
             )
@@ -140,26 +150,17 @@ private fun AppNavHost(viewModel: AppViewModel) {
                 },
                 onDownloadFile = { resource, uri -> viewModel.downloadFile(resource, uri) },
                 onDownloadFolder = { resource, uri -> viewModel.downloadFolder(resource, uri) },
-                onDisconnect = {
-                    viewModel.disconnect()
-                    navController.navigate("home") { popUpTo("home") { inclusive = true } }
-                },
+                onOpenSettings = openSettings,
+                playerViewModel = viewModel,
+                onExpandPlayer = { navController.navigate("player") },
             )
         }
 
         composable("player") {
-            val state = viewModel.connectionState
-            val client = (state as? ConnectionState.Connected)?.client
-            if (client != null) {
-                PlayerScreen(
-                    playlist = viewModel.playlist,
-                    startIndex = viewModel.playlistIndex,
-                    resolveUrl = { href -> client.resolve(href) },
-                    authHeader = client.authHeader(),
-                    cache = viewModel.getOrCreateCache(),
-                    onExit = { navController.popBackStack() },
-                )
-            }
+            PlayerScreen(
+                viewModel = viewModel,
+                onExit = { navController.popBackStack() },
+            )
         }
     }
 }
