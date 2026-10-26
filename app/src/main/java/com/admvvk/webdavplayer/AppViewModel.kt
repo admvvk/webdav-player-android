@@ -2,17 +2,23 @@ package com.admvvk.webdavplayer
 
 import android.app.Application
 import android.content.Context
+import android.net.Uri
+import android.webkit.MimeTypeMap
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.documentfile.provider.DocumentFile
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor
+import androidx.media3.datasource.cache.SimpleCache
 import com.admvvk.webdavplayer.webdav.WebDavClient
 import com.admvvk.webdavplayer.webdav.WebDavResource
 import com.admvvk.webdavplayer.webdav.isPlayable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 sealed interface ConnectionState {
     data object Disconnected : ConnectionState
@@ -58,6 +64,37 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     val savedUsername: String get() = prefs.getString(KEY_USER, "") ?: ""
     val savedPassword: String get() = prefs.getString(KEY_PASS, "") ?: ""
 
+    // --- Next-track pre-caching (Connection Settings) -----------------
+
+    var cacheSizeMb by mutableStateOf(prefs.getInt(KEY_CACHE_MB, DEFAULT_CACHE_MB))
+    private var mediaCache: SimpleCache? = null
+
+    /** The shared on-disk cache used by PlayerScreen's CacheDataSource. */
+    fun getOrCreateCache(): SimpleCache {
+        mediaCache?.let { return it }
+        val dir = File(getApplication<Application>().cacheDir, "media_cache")
+        val cache = SimpleCache(dir, LeastRecentlyUsedCacheEvictor(cacheSizeMb * 1024L * 1024L))
+        mediaCache = cache
+        return cache
+    }
+
+    fun setCacheSizeMb(mb: Int) {
+        val clamped = mb.coerceIn(16, 8192)
+        cacheSizeMb = clamped
+        prefs.edit().putInt(KEY_CACHE_MB, clamped).apply()
+        // The cache size (evictor limit) is fixed at construction time, so
+        // changing it means recreating the cache. Only safe to do when no
+        // player currently holds a DataSource backed by the old instance,
+        // which in practice means "not while the player screen is open".
+        mediaCache?.release()
+        mediaCache = null
+    }
+
+    // --- Directory listing / navigation --------------------------------
+
+    private fun mediaOnly(list: List<WebDavResource>): List<WebDavResource> =
+        list.filter { it.isDirectory || it.isPlayable() }
+
     fun connect(serverUrl: String, username: String, password: String) {
         connectionState = ConnectionState.Connecting
         val client = WebDavClient(serverUrl, username, password)
@@ -72,7 +109,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 pathStack = emptyList()
                 currentHref = null
                 currentPath = client.rootPath()
-                entries = list
+                entries = mediaOnly(list)
                 saveServerSettings(serverUrl, username, password)
             } catch (e: Exception) {
                 connectionState = ConnectionState.Error(e.message ?: "Connection failed")
@@ -92,7 +129,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 pathStack = pathStack + currentHref
                 currentHref = resource.href
                 currentPath = resource.href
-                entries = list
+                entries = mediaOnly(list)
             } catch (e: Exception) {
                 errorMessage = e.message ?: "Failed to load directory"
             } finally {
@@ -118,7 +155,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 pathStack = newStack
                 currentHref = parentHref
                 currentPath = parentHref ?: state.client.rootPath()
-                entries = list
+                entries = mediaOnly(list)
             } catch (e: Exception) {
                 errorMessage = e.message ?: "Failed to load directory"
             } finally {
@@ -165,6 +202,73 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    // --- Downloads (SAF: user picks the destination) -------------------
+
+    /** Downloads a single file to [destUri] (from ACTION_CREATE_DOCUMENT). */
+    fun downloadFile(resource: WebDavResource, destUri: Uri) {
+        val state = connectionState
+        if (state !is ConnectionState.Connected) return
+        viewModelScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    state.client.openDownloadStream(resource.href).use { input ->
+                        val output = getApplication<Application>().contentResolver.openOutputStream(destUri)
+                            ?: throw IllegalStateException("Cannot open destination")
+                        output.use { input.copyTo(it) }
+                    }
+                }
+                infoMessage = "Скачано: ${resource.displayName}"
+            } catch (e: Exception) {
+                errorMessage = "Ошибка скачивания «${resource.displayName}»: ${e.message}"
+            }
+        }
+    }
+
+    /**
+     * Downloads every directly-contained playable file of [resource] (a
+     * folder) into [treeUri] (from ACTION_OPEN_DOCUMENT_TREE). Nested
+     * sub-folders are not descended into, matching "play folder".
+     */
+    fun downloadFolder(resource: WebDavResource, treeUri: Uri) {
+        val state = connectionState
+        if (state !is ConnectionState.Connected) return
+        viewModelScope.launch {
+            try {
+                val files = withContext(Dispatchers.IO) {
+                    state.client.listDirectory(resource.href).filter { !it.isDirectory && it.isPlayable() }
+                }
+                if (files.isEmpty()) {
+                    infoMessage = "Отсутствуют медиафайлы"
+                    return@launch
+                }
+                val app = getApplication<Application>()
+                val treeDoc = DocumentFile.fromTreeUri(app, treeUri)
+                    ?: throw IllegalStateException("Cannot open destination folder")
+                var okCount = 0
+                withContext(Dispatchers.IO) {
+                    for (file in files) {
+                        try {
+                            val mime = MimeTypeMap.getSingleton()
+                                .getMimeTypeFromExtension(file.displayName.substringAfterLast('.', ""))
+                                ?: "application/octet-stream"
+                            val target = treeDoc.createFile(mime, file.displayName) ?: continue
+                            state.client.openDownloadStream(file.href).use { input ->
+                                val output = app.contentResolver.openOutputStream(target.uri) ?: continue
+                                output.use { input.copyTo(it) }
+                            }
+                            okCount++
+                        } catch (e: Exception) {
+                            // Best-effort: skip this file, keep going with the rest.
+                        }
+                    }
+                }
+                infoMessage = "Скачано файлов: $okCount из ${files.size}"
+            } catch (e: Exception) {
+                errorMessage = "Ошибка скачивания папки: ${e.message}"
+            }
+        }
+    }
+
     fun disconnect() {
         connectionState = ConnectionState.Disconnected
         entries = emptyList()
@@ -188,5 +292,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         private const val KEY_URL = "server_url"
         private const val KEY_USER = "username"
         private const val KEY_PASS = "password"
+        private const val KEY_CACHE_MB = "cache_size_mb"
+        const val DEFAULT_CACHE_MB = 256
     }
 }

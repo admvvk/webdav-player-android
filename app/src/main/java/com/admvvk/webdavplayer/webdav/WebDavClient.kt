@@ -7,7 +7,10 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import org.xmlpull.v1.XmlPullParser
+import java.io.Closeable
+import java.io.InputStream
 import java.io.StringReader
 import java.net.URLDecoder
 
@@ -88,6 +91,31 @@ class WebDavClient(
             val body = response.body?.string().orEmpty()
             return parseMultiStatus(body, url)
         }
+    }
+
+    /**
+     * Opens a readable stream for [path] (a GET request). The caller is
+     * responsible for closing the returned [DownloadStream] (which also
+     * closes the underlying HTTP response/connection).
+     */
+    fun openDownloadStream(path: String): DownloadStream {
+        val url = resolve(path)
+        val request = Request.Builder()
+            .url(url)
+            .header("Authorization", authHeader())
+            .get()
+            .build()
+        val response = client.newCall(request).execute()
+        if (!response.isSuccessful) {
+            response.close()
+            throw WebDavException("Download failed: HTTP ${response.code}")
+        }
+        val body = response.body
+        if (body == null) {
+            response.close()
+            throw WebDavException("Empty response body")
+        }
+        return DownloadStream(response, body.byteStream())
     }
 
     private fun parseMultiStatus(xml: String, requestUrl: String): List<WebDavResource> {
@@ -212,3 +240,14 @@ class WebDavClient(
 }
 
 class WebDavException(message: String) : Exception(message)
+
+/** A GET response body stream; closing it also closes the HTTP response. */
+class DownloadStream(private val response: Response, private val stream: InputStream) :
+    InputStream(), Closeable {
+    override fun read(): Int = stream.read()
+    override fun read(b: ByteArray, off: Int, len: Int): Int = stream.read(b, off, len)
+    override fun close() {
+        stream.close()
+        response.close()
+    }
+}

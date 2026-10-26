@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- A simple eighth-note glyph (head + stem + flag), centered within
+         the adaptive-icon safe zone so it isn't clipped by circular/
+         squircle/rounded-square launcher masks. -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M50,77 m-10,0 a10,10 0 1,0 20,0 a10,10 0 1,0 -20,0 z M58,22 h6 v55 h-6 z M64,22 C82,27 82,45 64,41 Z" />
+</vector>

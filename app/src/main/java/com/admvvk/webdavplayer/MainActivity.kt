@@ -18,10 +18,12 @@ import androidx.navigation.NavHostController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import com.admvvk.webdavplayer.ui.CacheSettingsScreen
 import com.admvvk.webdavplayer.ui.ConnectScreen
 import com.admvvk.webdavplayer.ui.FileListScreen
 import com.admvvk.webdavplayer.ui.HomeScreen
 import com.admvvk.webdavplayer.ui.PlayerScreen
+import com.admvvk.webdavplayer.ui.SettingsHomeScreen
 
 class MainActivity : ComponentActivity() {
     private val viewModel: AppViewModel by viewModels()
@@ -76,6 +78,14 @@ private fun AppNavHost(viewModel: AppViewModel) {
         }
 
         composable("settings") {
+            SettingsHomeScreen(
+                onBack = { navController.popBackStack() },
+                onServerSettings = { navController.navigate("settings/server") },
+                onConnectionSettings = { navController.navigate("settings/cache") },
+            )
+        }
+
+        composable("settings/server") {
             var attemptingConnect by remember { mutableStateOf(false) }
             val state = viewModel.connectionState
             LaunchedEffect(state) {
@@ -92,6 +102,17 @@ private fun AppNavHost(viewModel: AppViewModel) {
                 onConnect = { url, user, pass ->
                     attemptingConnect = true
                     viewModel.connect(url, user, pass)
+                },
+            )
+        }
+
+        composable("settings/cache") {
+            CacheSettingsScreen(
+                currentCacheSizeMb = viewModel.cacheSizeMb,
+                onBack = { navController.popBackStack() },
+                onSave = { mb ->
+                    viewModel.setCacheSizeMb(mb)
+                    navController.popBackStack()
                 },
             )
         }
@@ -117,6 +138,8 @@ private fun AppNavHost(viewModel: AppViewModel) {
                         navController.navigate("player")
                     }
                 },
+                onDownloadFile = { resource, uri -> viewModel.downloadFile(resource, uri) },
+                onDownloadFolder = { resource, uri -> viewModel.downloadFolder(resource, uri) },
                 onDisconnect = {
                     viewModel.disconnect()
                     navController.navigate("home") { popUpTo("home") { inclusive = true } }
@@ -133,6 +156,7 @@ private fun AppNavHost(viewModel: AppViewModel) {
                     startIndex = viewModel.playlistIndex,
                     resolveUrl = { href -> client.resolve(href) },
                     authHeader = client.authHeader(),
+                    cache = viewModel.getOrCreateCache(),
                     onExit = { navController.popBackStack() },
                 )
             }

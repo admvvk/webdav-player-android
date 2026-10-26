@@ -1,5 +1,8 @@
 package com.admvvk.webdavplayer.ui
 
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
@@ -7,6 +10,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowUpward
+import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.InsertDriveFile
 import androidx.compose.material3.*
@@ -36,11 +40,30 @@ fun FileListScreen(
     onOpenDirectory: (WebDavResource) -> Unit,
     onPlayFile: (WebDavResource) -> Unit,
     onPlayFolder: (WebDavResource) -> Unit,
+    onDownloadFile: (WebDavResource, Uri) -> Unit,
+    onDownloadFolder: (WebDavResource, Uri) -> Unit,
     onDisconnect: () -> Unit,
 ) {
     // Which folder's long-press context menu ("Воспроизвести папку") is open.
     var menuForHref by remember { mutableStateOf<String?>(null) }
     val snackbarHostState = remember { SnackbarHostState() }
+
+    // One shared SAF launcher per download kind; the pending resource is
+    // stashed here because the launcher callback doesn't get to choose
+    // its own argument -- it only gets the picked Uri (or null).
+    var pendingFileDownload by remember { mutableStateOf<WebDavResource?>(null) }
+    var pendingFolderDownload by remember { mutableStateOf<WebDavResource?>(null) }
+
+    val createFileLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("*/*")) { uri ->
+        val resource = pendingFileDownload
+        pendingFileDownload = null
+        if (uri != null && resource != null) onDownloadFile(resource, uri)
+    }
+    val openTreeLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        val resource = pendingFolderDownload
+        pendingFolderDownload = null
+        if (uri != null && resource != null) onDownloadFolder(resource, uri)
+    }
 
     // Messages are shown as transient Snackbars instead of a permanent
     // banner: a banner painted *under* the list is invisible (the bug that
@@ -98,6 +121,19 @@ fun FileListScreen(
                                     imageVector = if (resource.isDirectory) Icons.Filled.Folder else Icons.Filled.InsertDriveFile,
                                     contentDescription = null,
                                 )
+                            },
+                            trailingContent = {
+                                IconButton(onClick = {
+                                    if (resource.isDirectory) {
+                                        pendingFolderDownload = resource
+                                        openTreeLauncher.launch(null)
+                                    } else {
+                                        pendingFileDownload = resource
+                                        createFileLauncher.launch(resource.displayName)
+                                    }
+                                }) {
+                                    Icon(Icons.Filled.Download, contentDescription = "Download")
+                                }
                             },
                             modifier = Modifier.combinedClickable(
                                 onClick = {

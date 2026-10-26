@@ -63,7 +63,11 @@ dependencies {
     // Media playback
     implementation("androidx.media3:media3-exoplayer:1.4.0")
     implementation("androidx.media3:media3-ui:1.4.0")
+    implementation("androidx.media3:media3-datasource:1.4.0")
     implementation("androidx.media3:media3-datasource-okhttp:1.4.0")
+
+    // SAF folder/file download targets
+    implementation("androidx.documentfile:documentfile:1.0.1")
 
     // Networking / WebDAV
     implementation("com.squareup.okhttp3:okhttp:4.12.0")

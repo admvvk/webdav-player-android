@@ -1,6 +1,7 @@
 package com.admvvk.webdavplayer.ui
 
 import android.annotation.SuppressLint
+import android.net.Uri
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -42,7 +43,11 @@ import androidx.media3.common.MediaMetadata
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Tracks
+import androidx.media3.datasource.DataSpec
 import androidx.media3.datasource.DefaultHttpDataSource
+import androidx.media3.datasource.cache.CacheDataSource
+import androidx.media3.datasource.cache.CacheWriter
+import androidx.media3.datasource.cache.SimpleCache
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
@@ -53,7 +58,9 @@ import com.admvvk.webdavplayer.webdav.WebDavResource
  * Plays a queue of media resources (one file, or a whole folder's worth)
  * from the WebDAV server using Media3/ExoPlayer, with Prev/Play-Pause/
  * Stop/Next/Exit controls. Shows tag data (title/album) instead of the
- * raw filename, and technical format info below the artwork.
+ * raw filename, and technical format info below the artwork. When playing
+ * a folder queue (more than one track), the next track is opportunistically
+ * pre-downloaded into [cache] so a weak-signal patch doesn't stall it.
  */
 @SuppressLint("UnsafeOptInUsageError")
 @Composable
@@ -62,6 +69,7 @@ fun PlayerScreen(
     startIndex: Int,
     resolveUrl: (String) -> String,
     authHeader: String,
+    cache: SimpleCache,
     onExit: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -80,7 +88,11 @@ fun PlayerScreen(
     var tagAlbum by remember { mutableStateOf<String?>(null) }
     var techInfo by remember { mutableStateOf<String?>(null) }
 
-    val player = remember {
+    // The one in-flight "pre-fetch the next track" job, if any -- cancelled
+    // whenever we move on so we don't keep downloading something stale.
+    var prefetchWriter by remember { mutableStateOf<CacheWriter?>(null) }
+
+    val cacheDataSourceFactory = remember {
         val httpDataSourceFactory = DefaultHttpDataSource.Factory()
             .setDefaultRequestProperties(mapOf("Authorization" to authHeader))
             // Be generous with slow/large files (e.g. big FLAC/WAV over a
@@ -88,9 +100,15 @@ fun PlayerScreen(
             .setConnectTimeoutMs(15_000)
             .setReadTimeoutMs(15_000)
             .setAllowCrossProtocolRedirects(true)
+        CacheDataSource.Factory()
+            .setCache(cache)
+            .setUpstreamDataSourceFactory(httpDataSourceFactory)
+            .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR)
+    }
 
+    val player = remember {
         ExoPlayer.Builder(context)
-            .setMediaSourceFactory(DefaultMediaSourceFactory(context).setDataSourceFactory(httpDataSourceFactory))
+            .setMediaSourceFactory(DefaultMediaSourceFactory(context).setDataSourceFactory(cacheDataSourceFactory))
             .build()
             .apply {
                 addListener(object : Player.Listener {
@@ -136,20 +154,48 @@ fun PlayerScreen(
 
     // (Re)load the media item whenever the queue position changes, instead
     // of recreating the player (keeps the control bar/listener stable).
+    // Also kicks off (best-effort) pre-caching of the *next* track when
+    // playing a multi-track folder queue.
     LaunchedEffect(index) {
         playerError = null
         tagTitle = null
         tagAlbum = null
         techInfo = null
+
+        prefetchWriter?.cancel()
+        prefetchWriter = null
+
         val resource = playlist.getOrNull(index) ?: return@LaunchedEffect
         val url = resolveUrl(resource.href)
         player.setMediaItem(MediaItem.fromUri(url))
         player.prepare()
         player.playWhenReady = true
+
+        if (playlist.size > 1) {
+            val next = playlist.getOrNull(index + 1)
+            if (next != null) {
+                val nextUrl = resolveUrl(next.href)
+                val dataSource = cacheDataSourceFactory.createDataSource()
+                val dataSpec = DataSpec(Uri.parse(nextUrl))
+                val writer = CacheWriter(dataSource, dataSpec, null, null)
+                prefetchWriter = writer
+                Thread {
+                    try {
+                        writer.cache()
+                    } catch (e: Exception) {
+                        // Best-effort pre-fetch; playback itself will just
+                        // fetch normally if this didn't finish in time.
+                    }
+                }.start()
+            }
+        }
     }
 
     DisposableEffect(Unit) {
-        onDispose { player.release() }
+        onDispose {
+            prefetchWriter?.cancel()
+            player.release()
+        }
     }
 
     val current = playlist.getOrNull(index)
