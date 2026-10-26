@@ -8,12 +8,14 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
+import com.admvvk.webdavplayer.R
 
 /**
  * Plays a single media URL from the WebDAV server using Media3/ExoPlayer,
@@ -48,6 +50,7 @@ fun PlayerScreen(mediaUrl: String, authHeader: String) {
             factory = {
                 PlayerView(context).apply {
                     this.player = player
+                    this.defaultArtwork = ContextCompat.getDrawable(context, R.drawable.ic_music_placeholder)
                 }
             },
         )
