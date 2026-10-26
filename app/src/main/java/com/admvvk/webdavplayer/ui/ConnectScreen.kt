@@ -14,11 +14,14 @@ import com.admvvk.webdavplayer.ConnectionState
 @Composable
 fun ConnectScreen(
     connectionState: ConnectionState,
+    initialServerUrl: String = "https://",
+    initialUsername: String = "",
+    initialPassword: String = "",
     onConnect: (serverUrl: String, username: String, password: String) -> Unit,
 ) {
-    var serverUrl by remember { mutableStateOf("https://") }
-    var username by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
+    var serverUrl by remember { mutableStateOf(initialServerUrl) }
+    var username by remember { mutableStateOf(initialUsername) }
+    var password by remember { mutableStateOf(initialPassword) }
 
     Column(
         modifier = Modifier

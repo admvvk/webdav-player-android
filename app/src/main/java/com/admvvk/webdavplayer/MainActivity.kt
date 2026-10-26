@@ -42,6 +42,9 @@ private fun AppNavHost(viewModel: AppViewModel) {
         composable("connect") {
             ConnectScreen(
                 connectionState = viewModel.connectionState,
+                initialServerUrl = viewModel.savedServerUrl.ifEmpty { "https://" },
+                initialUsername = viewModel.savedUsername,
+                initialPassword = viewModel.savedPassword,
                 onConnect = { url, user, pass ->
                     viewModel.connect(url, user, pass)
                 },
