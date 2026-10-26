@@ -44,16 +44,13 @@ fun FileListScreen(
         },
     ) { padding ->
         Box(modifier = Modifier.padding(padding).fillMaxSize()) {
-            if (isLoading) {
-                CircularProgressIndicator(modifier = Modifier.align(androidx.compose.ui.Alignment.Center))
-            }
-            if (errorMessage != null) {
-                Text(
-                    errorMessage,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.padding(16.dp),
-                )
-            }
+            // IMPORTANT: draw the list first so the loading indicator and
+            // (especially) the error banner below are painted *on top* of
+            // it. They used to be declared before the LazyColumn, which in
+            // Compose means the LazyColumn painted over them -- an error
+            // from a failed openDirectory()/tap was silently hidden behind
+            // the still-visible old file list, looking like "nothing
+            // happened" when a folder tap actually failed.
             LazyColumn {
                 items(entries) { resource ->
                     ListItem(
@@ -78,6 +75,23 @@ fun FileListScreen(
                         },
                     )
                     Divider()
+                }
+            }
+            if (isLoading) {
+                CircularProgressIndicator(modifier = Modifier.align(androidx.compose.ui.Alignment.Center))
+            }
+            if (errorMessage != null) {
+                Surface(
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    modifier = Modifier
+                        .align(androidx.compose.ui.Alignment.TopCenter)
+                        .fillMaxWidth(),
+                ) {
+                    Text(
+                        errorMessage,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.padding(16.dp),
+                    )
                 }
             }
         }
