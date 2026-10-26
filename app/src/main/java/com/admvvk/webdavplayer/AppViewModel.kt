@@ -9,6 +9,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.admvvk.webdavplayer.webdav.WebDavClient
 import com.admvvk.webdavplayer.webdav.WebDavResource
+import com.admvvk.webdavplayer.webdav.isPlayable
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -35,6 +36,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     var isLoading by mutableStateOf(false)
     var errorMessage by mutableStateOf<String?>(null)
 
+    /** Transient, non-error info banner (e.g. "no media files in this folder"). */
+    var infoMessage by mutableStateOf<String?>(null)
+
+    /** Current playback queue and position within it, consumed by PlayerScreen. */
+    var playlist by mutableStateOf<List<WebDavResource>>(emptyList())
+    var playlistIndex by mutableStateOf(0)
+
     val savedServerUrl: String get() = prefs.getString(KEY_URL, "") ?: ""
     val savedUsername: String get() = prefs.getString(KEY_USER, "") ?: ""
     val savedPassword: String get() = prefs.getString(KEY_PASS, "") ?: ""
@@ -60,6 +68,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         if (state !is ConnectionState.Connected) return
         isLoading = true
         errorMessage = null
+        infoMessage = null
         viewModelScope.launch {
             try {
                 val list = withContext(Dispatchers.IO) { state.client.listDirectory(resource.href) }
@@ -73,10 +82,50 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** Starts a single-file playback queue immediately (no network needed). */
+    fun playSingleFile(resource: WebDavResource) {
+        playlist = listOf(resource)
+        playlistIndex = 0
+    }
+
+    /**
+     * Lists [resource] (a folder) non-recursively, keeps only directly
+     * playable media files (nested sub-folders are NOT included), and
+     * invokes [onResult] with the queue once loaded -- it is only called
+     * when at least one playable file was found; otherwise [infoMessage]
+     * ("Отсутствуют медиафайлы") or [errorMessage] is set instead.
+     */
+    fun playFolder(resource: WebDavResource, onResult: (List<WebDavResource>) -> Unit) {
+        val state = connectionState
+        if (state !is ConnectionState.Connected) return
+        isLoading = true
+        errorMessage = null
+        infoMessage = null
+        viewModelScope.launch {
+            try {
+                val list = withContext(Dispatchers.IO) { state.client.listDirectory(resource.href) }
+                val playableFiles = list.filter { !it.isDirectory && it.isPlayable() }
+                if (playableFiles.isEmpty()) {
+                    infoMessage = "Отсутствуют медиафайлы"
+                } else {
+                    playlist = playableFiles
+                    playlistIndex = 0
+                    onResult(playableFiles)
+                }
+            } catch (e: Exception) {
+                errorMessage = e.message ?: "Failed to load directory"
+            } finally {
+                isLoading = false
+            }
+        }
+    }
+
     fun disconnect() {
         connectionState = ConnectionState.Disconnected
         entries = emptyList()
         currentPath = "/"
+        playlist = emptyList()
+        playlistIndex = 0
     }
 
     private fun saveServerSettings(serverUrl: String, username: String, password: String) {

@@ -2,13 +2,31 @@ package com.admvvk.webdavplayer.ui
 
 import android.annotation.SuppressLint
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ExitToApp
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.SkipNext
+import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -27,16 +45,27 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.ui.PlayerView
 import com.admvvk.webdavplayer.R
+import com.admvvk.webdavplayer.webdav.WebDavResource
 
 /**
- * Plays a single media URL from the WebDAV server using Media3/ExoPlayer,
- * authenticating with HTTP Basic auth.
+ * Plays a queue of media resources (one file, or a whole folder's worth)
+ * from the WebDAV server using Media3/ExoPlayer, with Prev/Play-Pause/
+ * Stop/Next/Exit controls.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @SuppressLint("UnsafeOptInUsageError")
 @Composable
-fun PlayerScreen(mediaUrl: String, authHeader: String) {
+fun PlayerScreen(
+    playlist: List<WebDavResource>,
+    startIndex: Int,
+    resolveUrl: (String) -> String,
+    authHeader: String,
+    onExit: () -> Unit,
+) {
     val context = LocalContext.current
 
+    var index by remember { mutableStateOf(startIndex.coerceIn(0, (playlist.size - 1).coerceAtLeast(0))) }
+    var isPlaying by remember { mutableStateOf(true) }
     // Surfaced instead of letting the player sit silently "stuck" on a
     // network/decoder error with no feedback to the user.
     var playerError by remember { mutableStateOf<String?>(null) }
@@ -58,37 +87,101 @@ fun PlayerScreen(mediaUrl: String, authHeader: String) {
                     override fun onPlayerError(error: PlaybackException) {
                         playerError = "${error.errorCodeName}: ${error.cause?.message ?: error.message}"
                     }
+
+                    override fun onIsPlayingChanged(playing: Boolean) {
+                        isPlaying = playing
+                    }
+
+                    override fun onPlaybackStateChanged(playbackState: Int) {
+                        // Auto-advance when playing a folder queue.
+                        if (playbackState == Player.STATE_ENDED && index < playlist.lastIndex) {
+                            index += 1
+                        }
+                    }
                 })
-                setMediaItem(MediaItem.fromUri(mediaUrl))
-                prepare()
-                playWhenReady = true
             }
+    }
+
+    // (Re)load the media item whenever the queue position changes, instead
+    // of recreating the player (keeps the control bar/listener stable).
+    LaunchedEffect(index) {
+        playerError = null
+        val resource = playlist.getOrNull(index) ?: return@LaunchedEffect
+        val url = resolveUrl(resource.href)
+        player.setMediaItem(MediaItem.fromUri(url))
+        player.prepare()
+        player.playWhenReady = true
     }
 
     DisposableEffect(Unit) {
         onDispose { player.release() }
     }
 
-    Scaffold { padding ->
-        Box(modifier = Modifier.fillMaxSize().padding(padding)) {
-            AndroidView(
-                modifier = Modifier.fillMaxSize(),
-                factory = {
-                    PlayerView(context).apply {
-                        this.player = player
-                        this.defaultArtwork = ContextCompat.getDrawable(context, R.drawable.ic_music_placeholder)
-                    }
-                },
-            )
-            val error = playerError
-            if (error != null) {
-                Text(
-                    text = error,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .padding(12.dp),
+    val current = playlist.getOrNull(index)
+
+    Scaffold(
+        topBar = {
+            TopAppBar(title = { Text(current?.displayName.orEmpty()) })
+        },
+    ) { padding ->
+        Column(modifier = Modifier.fillMaxSize().padding(padding)) {
+            Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
+                AndroidView(
+                    modifier = Modifier.fillMaxSize(),
+                    factory = {
+                        PlayerView(context).apply {
+                            this.player = player
+                            this.useController = false
+                            this.defaultArtwork = ContextCompat.getDrawable(context, R.drawable.ic_music_placeholder)
+                        }
+                    },
                 )
+                val error = playerError
+                if (error != null) {
+                    Text(
+                        text = error,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.align(Alignment.TopCenter).padding(12.dp),
+                    )
+                }
+            }
+
+            Surface {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+                    horizontalArrangement = androidx.compose.foundation.layout.Arrangement.Center,
+                ) {
+                    IconButton(onClick = { if (index > 0) index -= 1 }, enabled = index > 0) {
+                        Icon(Icons.Filled.SkipPrevious, contentDescription = "Prev")
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    IconButton(onClick = {
+                        if (player.isPlaying) player.pause() else player.play()
+                    }) {
+                        Icon(
+                            if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                            contentDescription = "Play/Pause",
+                        )
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    IconButton(onClick = {
+                        player.pause()
+                        player.seekTo(0)
+                    }) {
+                        Icon(Icons.Filled.Stop, contentDescription = "Stop")
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    IconButton(
+                        onClick = { if (index < playlist.lastIndex) index += 1 },
+                        enabled = index < playlist.lastIndex,
+                    ) {
+                        Icon(Icons.Filled.SkipNext, contentDescription = "Next")
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    IconButton(onClick = onExit) {
+                        Icon(Icons.Filled.ExitToApp, contentDescription = "Exit to list")
+                    }
+                }
             }
         }
     }

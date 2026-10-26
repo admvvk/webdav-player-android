@@ -1,6 +1,5 @@
 package com.admvvk.webdavplayer
 
-import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -17,7 +16,6 @@ import androidx.navigation.compose.rememberNavController
 import com.admvvk.webdavplayer.ui.ConnectScreen
 import com.admvvk.webdavplayer.ui.FileListScreen
 import com.admvvk.webdavplayer.ui.PlayerScreen
-import com.admvvk.webdavplayer.webdav.WebDavResource
 
 class MainActivity : ComponentActivity() {
     private val viewModel: AppViewModel by viewModels()
@@ -61,13 +59,15 @@ private fun AppNavHost(viewModel: AppViewModel) {
                 entries = viewModel.entries,
                 isLoading = viewModel.isLoading,
                 errorMessage = viewModel.errorMessage,
+                infoMessage = viewModel.infoMessage,
                 onOpenDirectory = { viewModel.openDirectory(it) },
-                onPlayFile = { resource: WebDavResource ->
-                    val state = viewModel.connectionState
-                    if (state is ConnectionState.Connected) {
-                        val url = state.client.resolve(resource.href)
-                        val encoded = Uri.encode(url)
-                        navController.navigate("player/$encoded")
+                onPlayFile = { resource ->
+                    viewModel.playSingleFile(resource)
+                    navController.navigate("player")
+                },
+                onPlayFolder = { resource ->
+                    viewModel.playFolder(resource) {
+                        navController.navigate("player")
                     }
                 },
                 onDisconnect = {
@@ -77,12 +77,18 @@ private fun AppNavHost(viewModel: AppViewModel) {
             )
         }
 
-        composable("player/{url}") { backStackEntry ->
-            val encoded = backStackEntry.arguments?.getString("url").orEmpty()
-            val url = Uri.decode(encoded)
+        composable("player") {
             val state = viewModel.connectionState
-            val authHeader = (state as? ConnectionState.Connected)?.client?.authHeader().orEmpty()
-            PlayerScreen(mediaUrl = url, authHeader = authHeader)
+            val client = (state as? ConnectionState.Connected)?.client
+            if (client != null) {
+                PlayerScreen(
+                    playlist = viewModel.playlist,
+                    startIndex = viewModel.playlistIndex,
+                    resolveUrl = { href -> client.resolve(href) },
+                    authHeader = client.authHeader(),
+                    onExit = { navController.popBackStack() },
+                )
+            }
         }
     }
 }
