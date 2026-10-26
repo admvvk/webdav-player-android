@@ -247,19 +247,29 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 var okCount = 0
                 withContext(Dispatchers.IO) {
                     for (file in files) {
-                        try {
+                        val downloaded = try {
                             val mime = MimeTypeMap.getSingleton()
                                 .getMimeTypeFromExtension(file.displayName.substringAfterLast('.', ""))
                                 ?: "application/octet-stream"
-                            val target = treeDoc.createFile(mime, file.displayName) ?: continue
-                            state.client.openDownloadStream(file.href).use { input ->
-                                val output = app.contentResolver.openOutputStream(target.uri) ?: continue
-                                output.use { input.copyTo(it) }
+                            val target = treeDoc.createFile(mime, file.displayName)
+                            if (target != null) {
+                                state.client.openDownloadStream(file.href).use { input ->
+                                    val output = app.contentResolver.openOutputStream(target.uri)
+                                    if (output != null) {
+                                        output.use { input.copyTo(it) }
+                                        true
+                                    } else {
+                                        false
+                                    }
+                                }
+                            } else {
+                                false
                             }
-                            okCount++
                         } catch (e: Exception) {
                             // Best-effort: skip this file, keep going with the rest.
+                            false
                         }
+                        if (downloaded) okCount++
                     }
                 }
                 infoMessage = "Скачано файлов: $okCount из ${files.size}"
