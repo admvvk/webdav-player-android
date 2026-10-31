@@ -15,7 +15,9 @@ import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -23,6 +25,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -47,11 +50,13 @@ import com.admvvk.webdavplayer.R
  * this screen is just a view onto that state plus Prev/Play-Pause/Stop/
  * Next/Exit controls.
  */
+@OptIn(ExperimentalMaterial3Api::class)
 @SuppressLint("UnsafeOptInUsageError")
 @Composable
 fun PlayerScreen(
     viewModel: AppViewModel,
     onExit: () -> Unit,
+    onOpenSettings: () -> Unit,
 ) {
     val context = LocalContext.current
 
@@ -80,7 +85,20 @@ fun PlayerScreen(
         }
     }
 
-    Scaffold { padding ->
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = {},
+                actions = {
+                    // Settings screen #2 -- does not touch playback, and
+                    // returns here (not Home) on back.
+                    IconButton(onClick = onOpenSettings) {
+                        Icon(Icons.Filled.Settings, contentDescription = "Settings")
+                    }
+                },
+            )
+        },
+    ) { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding)) {
             Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
                 Text(

@@ -28,11 +28,11 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.admvvk.webdavplayer.ui.CacheSettingsScreen
-import com.admvvk.webdavplayer.ui.ConnectScreen
 import com.admvvk.webdavplayer.ui.FileListScreen
 import com.admvvk.webdavplayer.ui.HomeScreen
 import com.admvvk.webdavplayer.ui.PlayerScreen
-import com.admvvk.webdavplayer.ui.SettingsHomeScreen
+import com.admvvk.webdavplayer.ui.ServerSettingsScreen
+import com.admvvk.webdavplayer.ui.SettingsOtherScreen
 import com.admvvk.webdavplayer.ui.SoundSettingsScreen
 
 class MainActivity : ComponentActivity() {
@@ -82,14 +82,11 @@ class MainActivity : ComponentActivity() {
 private fun AppNavHost(viewModel: AppViewModel) {
     val navController: NavHostController = rememberNavController()
 
-    // Entering Settings always stops any active playback first.
-    val openSettings: () -> Unit = {
-        viewModel.stopAndClearPlayback()
-        navController.navigate("settings")
-    }
-    val backToHome: () -> Unit = {
-        navController.navigate("home") { popUpTo("home") { inclusive = true } }
-    }
+    // Settings screen #2 ("settings_other": connection cache + sound) is
+    // reachable from every screen except Home, and deliberately never
+    // touches playback -- just navigate there and let popBackStack()
+    // return to whichever screen (files/player) opened it.
+    val openOtherSettings: () -> Unit = { navController.navigate("settings_other") }
 
     NavHost(navController = navController, startDestination = "home") {
         composable("home") {
@@ -110,11 +107,13 @@ private fun AppNavHost(viewModel: AppViewModel) {
             HomeScreen(
                 isConnecting = state is ConnectionState.Connecting,
                 errorMessage = (state as? ConnectionState.Error)?.message,
-                onOpenSettings = openSettings,
+                // Settings screen #1 ("settings_server") -- server
+                // connection fields only, reachable only from here.
+                onOpenSettings = { navController.navigate("settings_server") },
                 onOpenPlayer = {
                     when {
                         state is ConnectionState.Connected -> navController.navigate("files")
-                        viewModel.savedServerUrl.isBlank() -> navController.navigate("settings")
+                        viewModel.savedServerUrl.isBlank() -> navController.navigate("settings_server")
                         else -> {
                             attemptingConnect = true
                             viewModel.connect(viewModel.savedServerUrl, viewModel.savedUsername, viewModel.savedPassword)
@@ -124,17 +123,7 @@ private fun AppNavHost(viewModel: AppViewModel) {
             )
         }
 
-        composable("settings") {
-            SettingsHomeScreen(
-                onBack = { navController.popBackStack() },
-                onBackToHome = backToHome,
-                onServerSettings = { navController.navigate("settings/server") },
-                onConnectionSettings = { navController.navigate("settings/cache") },
-                onSoundSettings = { navController.navigate("settings/sound") },
-            )
-        }
-
-        composable("settings/server") {
+        composable("settings_server") {
             var attemptingConnect by remember { mutableStateOf(false) }
             val state = viewModel.connectionState
             LaunchedEffect(state) {
@@ -143,15 +132,24 @@ private fun AppNavHost(viewModel: AppViewModel) {
                     navController.navigate("files") { popUpTo("home") { inclusive = false } }
                 }
             }
-            ConnectScreen(
+            ServerSettingsScreen(
                 connectionState = state,
                 initialServerUrl = viewModel.savedServerUrl.ifEmpty { "https://" },
                 initialUsername = viewModel.savedUsername,
                 initialPassword = viewModel.savedPassword,
+                onBack = { navController.popBackStack() },
                 onConnect = { url, user, pass ->
                     attemptingConnect = true
                     viewModel.connect(url, user, pass)
                 },
+            )
+        }
+
+        composable("settings_other") {
+            SettingsOtherScreen(
+                onBack = { navController.popBackStack() },
+                onConnectionSettings = { navController.navigate("settings/cache") },
+                onSoundSettings = { navController.navigate("settings/sound") },
             )
         }
 
@@ -194,8 +192,7 @@ private fun AppNavHost(viewModel: AppViewModel) {
                     navController.navigate("player")
                 },
                 onDownloadFile = { resource, uri -> viewModel.downloadFile(resource, uri) },
-                onDownloadFolder = { resource, uri -> viewModel.downloadFolder(resource, uri) },
-                onOpenSettings = openSettings,
+                onOpenSettings = openOtherSettings,
                 playerViewModel = viewModel,
                 onExpandPlayer = { navController.navigate("player") },
             )
@@ -205,6 +202,7 @@ private fun AppNavHost(viewModel: AppViewModel) {
             PlayerScreen(
                 viewModel = viewModel,
                 onExit = { navController.popBackStack() },
+                onOpenSettings = openOtherSettings,
             )
         }
     }

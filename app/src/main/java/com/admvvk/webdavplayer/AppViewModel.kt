@@ -118,9 +118,15 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         prefs.edit().putInt(KEY_CACHE_MB, clamped).apply()
         // The cache size (evictor limit) is fixed at construction time, so
         // changing it means recreating the cache. Only safe to do when no
-        // player currently holds a DataSource backed by the old instance.
-        mediaCache?.release()
-        mediaCache = null
+        // player currently holds a DataSource backed by the old instance --
+        // Settings screen #2 (where this is reachable) deliberately does
+        // NOT stop playback to open, so defer the swap: it takes effect
+        // next time the cache is (re)built, i.e. once stopAndClearPlayback()
+        // / onCleared() has released the old player and its cache.
+        if (exoPlayer == null) {
+            mediaCache?.release()
+            mediaCache = null
+        }
     }
 
     // --- Sound Settings: ReplayGain (album-level, from tags) + manual preamp ---

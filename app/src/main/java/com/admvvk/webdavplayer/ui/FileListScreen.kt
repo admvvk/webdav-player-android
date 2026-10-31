@@ -41,7 +41,6 @@ fun FileListScreen(
     onOpenDirectory: (WebDavResource) -> Unit,
     onPlayFile: (WebDavResource) -> Unit,
     onDownloadFile: (WebDavResource, Uri) -> Unit,
-    onDownloadFolder: (WebDavResource, Uri) -> Unit,
     onOpenSettings: () -> Unit,
     playerViewModel: AppViewModel,
     onExpandPlayer: () -> Unit,
@@ -52,17 +51,11 @@ fun FileListScreen(
     // stashed here because the launcher callback doesn't get to choose
     // its own argument -- it only gets the picked Uri (or null).
     var pendingFileDownload by remember { mutableStateOf<WebDavResource?>(null) }
-    var pendingFolderDownload by remember { mutableStateOf<WebDavResource?>(null) }
 
     val createFileLauncher = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("*/*")) { uri ->
         val resource = pendingFileDownload
         pendingFileDownload = null
         if (uri != null && resource != null) onDownloadFile(resource, uri)
-    }
-    val openTreeLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        val resource = pendingFolderDownload
-        pendingFolderDownload = null
-        if (uri != null && resource != null) onDownloadFolder(resource, uri)
     }
 
     // Messages are shown as transient Snackbars instead of a permanent
@@ -129,16 +122,16 @@ fun FileListScreen(
                             )
                         },
                         trailingContent = {
-                            IconButton(onClick = {
-                                if (resource.isDirectory) {
-                                    pendingFolderDownload = resource
-                                    openTreeLauncher.launch(null)
-                                } else {
+                            // Download is file-only now -- a whole-folder
+                            // download via this row felt like an easy way
+                            // to accidentally pull gigabytes of media.
+                            if (!resource.isDirectory) {
+                                IconButton(onClick = {
                                     pendingFileDownload = resource
                                     createFileLauncher.launch(resource.displayName)
+                                }) {
+                                    Icon(Icons.Filled.Download, contentDescription = "Download")
                                 }
-                            }) {
-                                Icon(Icons.Filled.Download, contentDescription = "Download")
                             }
                         },
                         modifier = Modifier.clickable {
