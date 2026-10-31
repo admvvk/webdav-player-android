@@ -1,7 +1,10 @@
 package com.admvvk.webdavplayer
 
 import android.app.Application
+import android.content.ComponentName
 import android.content.Context
+import android.content.Intent
+import android.content.ServiceConnection
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.audiofx.LoudnessEnhancer
@@ -9,6 +12,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.Uri
 import android.os.Handler
+import android.os.IBinder
 import android.os.Looper
 import android.webkit.MimeTypeMap
 import androidx.compose.runtime.getValue
@@ -266,6 +270,43 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         registerConnectivityCallback()
     }
 
+    // --- Background playback: hand the ExoPlayer instance to PlaybackService
+    // (a MediaSessionService) so Android treats this as an active media
+    // session and doesn't throttle/kill the app once it's backgrounded. ---
+
+    private var playbackService: PlaybackService? = null
+    private var serviceBound = false
+    private val serviceConnection = object : ServiceConnection {
+        override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
+            val service = (binder as? PlaybackService.LocalBinder)?.getService() ?: return
+            playbackService = service
+            exoPlayer?.let { service.setPlayer(it) }
+        }
+
+        override fun onServiceDisconnected(name: ComponentName?) {
+            playbackService = null
+        }
+    }
+
+    private fun bindPlaybackService() {
+        val context = getApplication<Application>()
+        val intent = Intent(context, PlaybackService::class.java)
+        if (!serviceBound) {
+            context.startService(intent)
+            serviceBound = context.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)
+        }
+    }
+
+    private fun unbindPlaybackService() {
+        playbackService?.clearPlayer()
+        if (serviceBound) {
+            runCatching { getApplication<Application>().unbindService(serviceConnection) }
+            serviceBound = false
+        }
+        playbackService = null
+        getApplication<Application>().stopService(Intent(getApplication(), PlaybackService::class.java))
+    }
+
     private fun registerConnectivityCallback() {
         if (connectivityCallback != null) return
         val cm = getApplication<Application>()
@@ -430,6 +471,8 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             }
         })
         exoPlayer = player
+        bindPlaybackService()
+        playbackService?.setPlayer(player)
         startPositionTicker()
         return player
     }
@@ -527,6 +570,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         stopPositionTicker()
         prefetchWriter?.cancel()
         prefetchWriter = null
+        unbindPlaybackService()
         exoPlayer?.run {
             stop()
             release()
@@ -554,6 +598,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         unregisterConnectivityCallback()
         cancelScheduledRetry()
         stopPositionTicker()
+        unbindPlaybackService()
         exoPlayer?.release()
         mediaCache?.release()
         loudnessEnhancer?.release()
