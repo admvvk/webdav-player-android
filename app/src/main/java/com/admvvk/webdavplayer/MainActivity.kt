@@ -2,8 +2,12 @@ package com.admvvk.webdavplayer
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.activity.ComponentActivity
@@ -48,6 +52,21 @@ class MainActivity : ComponentActivity() {
                 != PackageManager.PERMISSION_GRANTED
         ) {
             requestNotificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        // Ask to be exempted from Doze/App Standby battery optimizations.
+        // Needed in addition to the foreground service on some OEM ROMs
+        // (MIUI, ColorOS/RealmeUI, ...) that still throttle a backgrounded
+        // app's network access otherwise. Standalone from any vendor-
+        // specific "background app management" toggle, which has no
+        // public API and must be enabled by the user manually.
+        val powerManager = getSystemService(PowerManager::class.java)
+        if (powerManager != null && !powerManager.isIgnoringBatteryOptimizations(packageName)) {
+            runCatching {
+                startActivity(
+                    Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                        .setData(Uri.parse("package:$packageName"))
+                )
+            }
         }
         setContent {
             MaterialTheme {

@@ -420,6 +420,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             .setMediaSourceFactory(mediaSourceFactory)
             .setLoadControl(loadControl)
             .build()
+        // Hold a CPU wake lock + WiFi lock for as long as playback is
+        // active, so a Doze-triggered CPU sleep (screen off, stationary)
+        // can't stall decoding/network I/O between buffer refills.
+        player.setWakeMode(C.WAKE_MODE_NETWORK)
         player.addListener(object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
                 playerError = "${error.errorCodeName}: ${error.cause?.message ?: error.message}"
