@@ -470,8 +470,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         (0 until group.length).firstOrNull { group.isTrackSelected(it) }
                             ?.let { group.getTrackFormat(it) }
                     }
-                sampleRateHz = format?.sampleRate?.takeIf { it > 0 }
-                bitrateKbps = format?.bitrate?.takeIf { it > 0 }?.let { it / 1000 }
+                // sampleRateHz/bitrateKbps are NOT set from `format` here --
+                // see probeTechInfo() below for why (ExoPlayer's Mp3Extractor
+                // was observed to report garbage values for real files with a
+                // large embedded ID3 cover, and never reports a bitrate at all
+                // for FLAC).
                 albumReplayGainDb = format?.let { extractAlbumReplayGainDb(it) }
                 applyGain()
             }
@@ -485,6 +488,148 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         playbackService?.setPlayer(player)
         startPositionTicker()
         return player
+    }
+
+    // --- Independent bitrate/sample-rate probe ---------------------------
+    //
+    // ExoPlayer's onTracksChanged Format was observed to report WRONG
+    // values for real-world files in this app's library -- e.g. a
+    // confirmed-320kbps/44.1kHz CBR MP3 (verified with ffprobe/mediainfo
+    // and a manual MPEG frame-header decode) showed up as 96kbps/48kHz in
+    // the UI, and FLAC never got a bitrate at all (expected for FLAC,
+    // which has none, but still worth computing an average for display).
+    // Root cause looks like Mp3Extractor's frame sync landing inside the
+    // file's large embedded ID3 cover image when the extractor doesn't
+    // correctly resume right after the ID3v2 tag's declared (syncsafe)
+    // size. Rather than depend on that, read just enough of the raw file
+    // ourselves (bounded to a few MB) and decode the real header/stream
+    // info directly -- small, dependency-free, and authoritative:
+    //   - MP3: skip the ID3v2 tag via its own declared size, then decode
+    //     the first MPEG frame header's bitrate/sample-rate index bits.
+    //     (A plain first-frame read, same approximation simple players
+    //     use for true VBR without a Xing/Info header -- fine here since
+    //     the reported files are CBR, and far better than the wrong
+    //     container-reported values.)
+    //   - FLAC: parse the STREAMINFO metadata block (fixed position right
+    //     after the "fLaC" magic) for the exact sample rate and total
+    //     sample count, then derive an *average* bitrate from the known
+    //     file size (from the WebDAV listing) and that exact duration --
+    //     the same "average bitrate" other players show for lossless
+    //     formats.
+
+    private fun probeTechInfoAsync(client: WebDavClient, resource: WebDavResource) {
+        viewModelScope.launch {
+            val result = withContext(Dispatchers.IO) { probeTechInfo(client, resource) }
+            // Guard against a late result landing after the user has
+            // already skipped to a different track.
+            if (result != null && currentTrack?.href == resource.href) {
+                sampleRateHz = result.first
+                bitrateKbps = result.second
+            }
+        }
+    }
+
+    private fun probeTechInfo(client: WebDavClient, resource: WebDavResource): Pair<Int, Int>? {
+        return try {
+            val cap = 2 * 1024 * 1024 // covers typical ID3 cover art comfortably
+            val buf = ByteArray(cap)
+            var total = 0
+            client.openDownloadStream(resource.href).use { stream ->
+                while (total < cap) {
+                    val n = stream.read(buf, total, cap - total)
+                    if (n <= 0) break
+                    total += n
+                }
+            }
+            when {
+                total >= 42 && buf[0] == 'f'.code.toByte() && buf[1] == 'L'.code.toByte() &&
+                    buf[2] == 'a'.code.toByte() && buf[3] == 'C'.code.toByte() ->
+                    probeFlacStreamInfo(buf, total, resource.contentLength)
+                total >= 10 && buf[0] == 'I'.code.toByte() && buf[1] == 'D'.code.toByte() &&
+                    buf[2] == '3'.code.toByte() -> {
+                    val tagSize = syncSafeSize(buf, 6) + 10
+                    probeMp3FrameHeader(buf, total, tagSize)
+                }
+                else -> probeMp3FrameHeader(buf, total, 0)
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun syncSafeSize(buf: ByteArray, offset: Int): Int {
+        var size = 0
+        for (i in 0 until 4) size = (size shl 7) or (buf[offset + i].toInt() and 0x7f)
+        return size
+    }
+
+    private fun probeFlacStreamInfo(buf: ByteArray, total: Int, fileSizeBytes: Long): Pair<Int, Int>? {
+        val blockOffset = 4
+        if (blockOffset + 4 > total) return null
+        val blockType = buf[blockOffset].toInt() and 0x7f
+        if (blockType != 0) return null // STREAMINFO is always the first metadata block
+        val length = ((buf[blockOffset + 1].toInt() and 0xFF) shl 16) or
+            ((buf[blockOffset + 2].toInt() and 0xFF) shl 8) or
+            (buf[blockOffset + 3].toInt() and 0xFF)
+        val block = blockOffset + 4
+        if (block + length > total || length < 18) return null
+        // Bytes 10..17 of STREAMINFO: sampleRate(20b) | channels-1(3b) | bps-1(5b) | totalSamples(36b)
+        var bits = 0L
+        for (i in 0 until 8) bits = (bits shl 8) or (buf[block + 10 + i].toLong() and 0xFF)
+        val sampleRate = (bits ushr 44).toInt()
+        val totalSamples = bits and 0xFFFFFFFFFL
+        if (sampleRate <= 0) return null
+        if (totalSamples <= 0 || fileSizeBytes <= 0) return sampleRate to 0
+        val durationSeconds = totalSamples.toDouble() / sampleRate
+        val bitrateKbps = ((fileSizeBytes * 8) / durationSeconds / 1000).toInt()
+        return sampleRate to bitrateKbps
+    }
+
+    private val mpegSampleRatesByVersion = mapOf(
+        3 to intArrayOf(44100, 48000, 32000), // MPEG1
+        2 to intArrayOf(22050, 24000, 16000), // MPEG2
+        0 to intArrayOf(11025, 12000, 8000),  // MPEG2.5
+    )
+    private val mpegBitrateTableV1LayerI = intArrayOf(0,32,64,96,128,160,192,224,256,288,320,352,384,416,448,-1)
+    private val mpegBitrateTableV1LayerII = intArrayOf(0,32,48,56,64,80,96,112,128,160,192,224,256,320,384,-1)
+    private val mpegBitrateTableV1LayerIII = intArrayOf(0,32,40,48,56,64,80,96,112,128,160,192,224,256,320,-1)
+    private val mpegBitrateTableV2 = intArrayOf(0,8,16,24,32,40,48,56,64,80,96,112,128,144,160,-1)
+
+    private fun probeMp3FrameHeader(buf: ByteArray, total: Int, startOffset: Int): Pair<Int, Int>? {
+        var i = startOffset.coerceAtLeast(0)
+        while (i + 4 <= total) {
+            val b0 = buf[i].toInt() and 0xFF
+            val b1 = buf[i + 1].toInt() and 0xFF
+            if (b0 == 0xFF && (b1 and 0xE0) == 0xE0) {
+                val versionBits = (b1 shr 3) and 0x3
+                val layerBits = (b1 shr 1) and 0x3
+                if (layerBits != 0 && versionBits != 1) {
+                    val b2 = buf[i + 2].toInt() and 0xFF
+                    val bitrateIdx = (b2 shr 4) and 0xF
+                    val sampleRateIdx = (b2 shr 2) and 0x3
+                    if (bitrateIdx in 1..14 && sampleRateIdx in 0..2) {
+                        val sampleRate = mpegSampleRatesByVersion[versionBits]?.get(sampleRateIdx)
+                        val isV1 = versionBits == 3
+                        val bitrateTable = if (isV1) {
+                            when (layerBits) {
+                                1 -> mpegBitrateTableV1LayerIII
+                                2 -> mpegBitrateTableV1LayerII
+                                3 -> mpegBitrateTableV1LayerI
+                                else -> null
+                            }
+                        } else {
+                            mpegBitrateTableV2
+                        }
+                        val bitrate = bitrateTable?.getOrNull(bitrateIdx)
+                        if (sampleRate != null && bitrate != null && bitrate > 0) {
+                            return sampleRate to bitrate
+                        }
+                    }
+                }
+            }
+            i++
+        }
+        return null
     }
 
     private fun loadCurrentTrack() {
@@ -510,6 +655,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         player.prepare()
         player.playWhenReady = true
         applyGain()
+        probeTechInfoAsync(c, resource)
 
         if (playbackPlaylist.size > 1) {
             val next = playbackPlaylist.getOrNull(playbackIndex + 1)
